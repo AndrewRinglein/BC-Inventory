@@ -88,11 +88,12 @@ export default function Open() {
   const [code, setCode] = useState('');
   const [ask, setAsk] = useState(null);       // { kind: 'remainder'|'close'|'soldout'|'receive', box?, product?, serial? }
   const [addGame, setAddGame] = useState(null);
+  const [pending, setPending] = useState(null);   // game picked by a game-barcode scan; next scan is its serial
   const [busy, setBusy] = useState(false);
   const scanBoxRef = useRef(null);
   const queue = useRef(Promise.resolve());
   const live = useRef({});
-  live.current = { products, boxes, sessionDate };
+  live.current = { products, boxes, sessionDate, pending };
 
   const pmap = useMemo(() => Object.fromEntries(products.map((p) => [p.id, p])), [products]);
   const lastCountOf = useMemo(() => {
@@ -152,7 +153,9 @@ export default function Open() {
     const run = async () => {
       if (!editable) return { ok: false, message: 'Your role can\'t open boxes.' };
       const cur = live.current;
-      const r = resolveOpenScan(raw, { products: cur.products, boxes: cur.boxes });
+      const r = resolveOpenScan(raw, { products: cur.products, boxes: cur.boxes, pending: cur.pending });
+      if (r.action === 'pick') { live.current.pending = r.product; setPending(r.product); return { ok: true, message: r.message }; }
+      if (cur.pending) { live.current.pending = null; setPending(null); }
       if (r.ok) {
         try { return await open(r.box, r.product); } catch (e) { return { ok: false, message: e.message }; }
       }
@@ -162,7 +165,7 @@ export default function Open() {
       }
       if (r.reason === 'unknown_game') {
         setAddGame({ form: r.form, serial: r.serial });
-        return { ok: false, message: `Form ${r.form} isn't in the catalog — add the game to open this box.` };
+        return { ok: false, message: r.message };
       }
       return { ok: false, message: r.message };
     };
@@ -254,9 +257,9 @@ export default function Open() {
         {editable ? (
           <form onSubmit={typed} style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
             <div className="field" style={{ margin: 0 }}>
-              <label>Scan a box to open it</label>
+              <label>Scan the game barcode, then the box serial</label>
               <input ref={scanBoxRef} type="text" data-scan-target="1" value={code}
-                onChange={(e) => setCode(e.target.value)} placeholder="e.g. CR5 0012345"
+                onChange={(e) => setCode(e.target.value)} placeholder="game barcode, then serial"
                 style={{ width: 250, borderColor: 'var(--orange)', fontFamily: "'IBM Plex Mono',monospace" }} />
             </div>
             <span className="scan-ind on"><span className="dot" />scanner on</span>
@@ -264,6 +267,13 @@ export default function Open() {
         ) : <span className="dimmer" style={{ fontSize: 12.5 }}>Read-only for your role.</span>}
       </div>
 
+      {pending && (
+        <div className="card pad" style={{ marginBottom: 14, display: 'flex', gap: 12, alignItems: 'center', background: '#ecfdf5', borderColor: 'var(--green)' }}>
+          <span>Game: <b>{pending.name}</b> <span className="mono dim">· form {pending.form_number} · {Number(pending.tickets || 0).toLocaleString()} tickets</span> — <b>now scan the box serial</b></span>
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost sm" onClick={() => setPending(null)}>Cancel</button>
+        </div>
+      )}
       <div className="card" style={{ overflow: 'hidden', marginBottom: 14 }}>
         <div style={{ padding: '12px 16px', fontWeight: 600, fontSize: 13, borderBottom: '1px solid var(--border)' }}>
           Open on the floor ({openList.length})
@@ -367,6 +377,12 @@ export default function Open() {
           onSaved={async (product) => {
             const serial = addGame.serial;
             setAddGame(null);
+            if (!serial) {           // added from a lone game barcode: the serial comes next
+              live.current.pending = product; setPending(product);
+              flashFor(true);
+              setToast(`${product.name} added — now scan the box serial.`);
+              return;
+            }
             try { await receiveAndOpen(product, serial); } catch (e) { flashFor(false); setToast(e.message, null, 6000); }
           }} />
       )}

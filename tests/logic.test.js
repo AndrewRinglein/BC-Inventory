@@ -459,3 +459,51 @@ test('undoing an open clears any remainder on the box', async () => {
   await s.undoOpen(box.id);
   assert.equal((await s.getBoxes('bc')).find((x) => x.id === box.id).tickets_remaining, null);
 });
+
+// ---------------------------------------------------------------- real field barcodes (Frontier flash catalog)
+const { readScan } = await import('../src/lib/logic/scan.js');
+const CANDY = G({ id: 'G11', name: 'Candy Pack', form_number: '6747U', tickets: 250 });
+const UNICORN = G({ id: 'G30', name: 'Wild Unicorn', form_number: '6303W', tickets: 1060 });
+const SR = G({ id: 'G2b', name: 'Shamrocks', form_number: 'SR3' });
+const field = [CANDY, UNICORN, SR, G()];
+test('a game barcode with a maker prefix finds the game by its form number', () => {
+  assert.equal(gameForForm(field, 'AI6747U').id, 'G11');   // Candy Pack, as in the Frontier catalog
+  assert.equal(gameForForm(field, 'AN6303W').id, 'G30');   // Wild Unicorn
+  assert.equal(gameForForm(field, 'SR3').id, 'G2b');       // a bare form number still works
+});
+test('a suffix letter is never ignored — AN6303WR is a different box', () => {
+  assert.equal(gameForForm(field, 'AN6303WR'), null);
+});
+test('two scans: game barcode, then serial', () => {
+  const boxes = [];
+  const first = resolveReceiveScan('AI6747U', { products: field, boxes });
+  assert.equal(first.action, 'pick');
+  assert.equal(first.product.id, 'G11');
+  const second = resolveReceiveScan('0012345', { products: field, boxes, pending: first.product });
+  assert.equal(second.ok, true);
+  assert.equal(second.product.id, 'G11');
+  assert.equal(second.serial, '0012345');
+});
+test('one combined scan with a maker prefix also works', () => {
+  const r = resolveReceiveScan('AI6747U 0012345', { products: field, boxes: [] });
+  assert.equal(r.ok, true);
+  assert.equal(r.product.id, 'G11');
+});
+test('with a game picked, the next scan is its serial even if it looks like a code', () => {
+  const r = readScan('SR3', { products: field, pending: CANDY });
+  assert.equal(r.type, 'box');
+  assert.equal(r.product.id, 'G11');
+  assert.equal(r.serial, 'SR3');
+});
+test('an unknown lone code offers Add game, with the serial still to come', () => {
+  const r = resolveReceiveScan('AN9999Z', { products: field, boxes: [] });
+  assert.equal(r.reason, 'unknown_game');
+  assert.equal(r.form, 'AN9999Z');
+  assert.equal(r.serial, null);
+});
+test('Open takes the same two scans', () => {
+  const boxes = [{ id: 'b', product_id: 'G30', serial: '77', state: 'in_inventory' }];
+  const pick = resolveOpenScan('AN6303W', { products: field, boxes });
+  assert.equal(pick.action, 'pick');
+  assert.equal(resolveOpenScan('77', { products: field, boxes, pending: pick.product }).box.id, 'b');
+});

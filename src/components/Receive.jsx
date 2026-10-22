@@ -33,6 +33,7 @@ export default function Receive() {
   const [lines, setLines] = useState([]);              // the PO's lines
   const [code, setCode] = useState('');
   const [addGame, setAddGame] = useState(null);        // { form, serial } from an unknown scan
+  const [pending, setPending] = useState(null);        // game picked by a game-barcode scan; next scan is its serial
   const [stage, setStage] = useState('scan');          // scan | emails
   const [emails, setEmails] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -40,7 +41,7 @@ export default function Receive() {
   const scanBoxRef = useRef(null);
   const queue = useRef(Promise.resolve());
   const live = useRef({});
-  live.current = { products, boxes, poId, shipment, receivedOn, invoiceNo };
+  live.current = { products, boxes, poId, shipment, receivedOn, invoiceNo, pending };
 
   // a delivery record exists from the first scan, even if every scan is undone
   const started = !!shipment || scanned.length > 0;
@@ -118,7 +119,10 @@ export default function Receive() {
       if (!can('receive')) return { ok: false, message: 'Your role can\'t receive deliveries.' };
       if (stage !== 'scan') return { ok: false, message: 'Finish or close the emails first.' };
       const cur = live.current;
-      const r = resolveReceiveScan(raw, { products: cur.products, boxes: cur.boxes, poId: cur.poId });
+      const r = resolveReceiveScan(raw, { products: cur.products, boxes: cur.boxes, poId: cur.poId, pending: cur.pending });
+      if (r.action === 'pick') { live.current.pending = r.product; setPending(r.product); return { ok: true, message: r.message }; }
+      // a serial scanned for a picked game ends that game's turn, whatever happens next
+      if (cur.pending) { live.current.pending = null; setPending(null); }
       if (r.reason === 'unknown_game') { setAddGame({ form: r.form, serial: r.serial }); return { ok: false, message: r.message }; }
       if (!r.ok) return { ok: false, message: r.message };
       try {
@@ -164,7 +168,7 @@ export default function Receive() {
 
   const startOver = () => {
     setShipment(null); live.current.shipment = null;
-    setScanned([]); setInvoiceNo(''); setEmails(null); setStage('scan');
+    setScanned([]); setInvoiceNo(''); setEmails(null); setStage('scan'); setPending(null);
     setReceivedOn(today()); pickedRef.current = false; setReceivingPo(null);
   };
 
@@ -298,9 +302,9 @@ export default function Receive() {
           <div style={{ flex: 1 }} />
           <form onSubmit={typed} style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
             <div className="field" style={{ margin: 0 }}>
-              <label>Scan a box (or type form number, space, serial)</label>
+              <label>Scan the game barcode, then the box serial</label>
               <input ref={scanBoxRef} type="text" data-scan-target="1" value={code}
-                onChange={(e) => setCode(e.target.value)} placeholder="e.g. CR5 0012345"
+                onChange={(e) => setCode(e.target.value)} placeholder="game barcode, then serial"
                 style={{ width: 250, borderColor: 'var(--green)', fontFamily: "'IBM Plex Mono',monospace" }} />
             </div>
             <span className="scan-ind on"><span className="dot" />{scanned.length} scanned</span>
@@ -314,6 +318,13 @@ export default function Receive() {
         )}
       </div>
 
+      {pending && (
+        <div className="card pad" style={{ marginBottom: 14, display: 'flex', gap: 12, alignItems: 'center', background: '#ecfdf5', borderColor: 'var(--green)' }}>
+          <span>Game: <b>{pending.name}</b> <span className="mono dim">· form {pending.form_number} · {Number(pending.tickets || 0).toLocaleString()} tickets</span> — <b>now scan the box serial</b></span>
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost sm" onClick={() => setPending(null)}>Cancel</button>
+        </div>
+      )}
       {po && (
         <div className="card" style={{ overflow: 'hidden', marginBottom: 14 }}>
           <div style={{ padding: '10px 16px', fontWeight: 600, fontSize: 13, borderBottom: '1px solid var(--border)' }}>
@@ -400,6 +411,12 @@ export default function Receive() {
           onSaved={async (product) => {
             const serial = addGame.serial;
             setAddGame(null);
+            if (!serial) {           // added from a lone game barcode: the serial comes next
+              live.current.pending = product; setPending(product);
+              flashFor(true);
+              setToast(`${product.name} added — now scan the box serial.`);
+              return;
+            }
             await enqueue(async () => {
               try {
                 const box = await receive(product, serial);

@@ -82,9 +82,11 @@ export default function AddGameModal({ form = '', serial = '', onSaved, onClose 
     <div className="modal-bg" onClick={() => !busy && onClose?.()}>
       <form className="modal" style={{ width: 560 }} onClick={(e) => e.stopPropagation()} onSubmit={save}>
         <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>Add a game</div>
-        {serial
+        {form
           ? <p className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
-              Form <b className="mono">{form}</b> isn't in the catalog. Save it and box <b className="mono">#{serial}</b> is received straight away.
+              <b className="mono">{form}</b> isn't in the catalog.{' '}
+              {serial ? <>Save it and box <b className="mono">#{serial}</b> is received straight away.</> : 'Save it, then scan the box serial.'}
+              {/^[A-Z]{2}\d/.test(form) && <> Game barcodes usually carry a two-letter maker code in front of the form number (e.g. AI6747U for form 6747U); either is fine here.</>}
             </p>
           : <p className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>Everything from the ticket sheet. Cost can be left blank and filled in later.</p>}
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginBottom: 10 }}>

@@ -5,7 +5,7 @@ compliance report built from the floor scans. Copied from the bingo
 [Inventory-Management](https://github.com/AndrewRinglein/Inventory-Management) app at commit
 `e7dabdc` and reworked for BC; it shares no database, deployment or code path with it.
 
-See `SETUP.md` for going live and `docs/SPEC.md` for the product spec.
+See `SETUP.md` for going live and `docs/SPEC.md` for where the product spec lives.
 
 ## What it does
 

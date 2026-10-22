@@ -1,4 +1,4 @@
-// Scanner input: capture + resolution.
+// Scanner input: capture + parsing + resolution.
 //
 // Capture: HID keyboard-wedge scanners "type" the code as a fast keystroke burst
 // ending in Enter. We watch document keydown; characters arriving faster than
@@ -6,8 +6,11 @@
 // Human typing is slower and (unless focused on our hidden pattern) goes to
 // whatever input has focus — we ignore bursts when a text field is focused
 // UNLESS the field opts in with data-scan-target.
-
-import { isFloor, locationLabel } from './location.js';
+//
+// BC barcodes carry BOTH values in one scan: the game's form number, a space, then
+// the box serial number — e.g. "CR5 0012345". The bingo app this was copied from
+// matched on the serial alone; here the form number says which game the box is,
+// so a box can be received straight from a scan without asking.
 
 const BURST_MS = 45;
 const MIN_LEN = 4;
@@ -37,77 +40,107 @@ export function createScanCapture(onScan) {
   return () => document.removeEventListener('keydown', handler, true);
 }
 
+/** Codes compare as text, case- and space-insensitive: "cr5" is "CR5". */
+export const normCode = (s) => String(s ?? '').trim().toUpperCase().replace(/\s+/g, '');
+
 /**
- * Resolve a scanned code against the hall's boxes for the current mode.
- * ctx: { mode: 'receive'|'open'|'soldout'|'off', boxes, hallId, poId? }
- * Returns an action descriptor — the caller performs it and shows feedback:
- *   {ok:true,  action:'receive'|'open'|'soldout', box}
- *   {ok:false, reason:'off'|'unknown'|'duplicate'|'wrong_state'|'wrong_po', box?, message}
+ * Split one scan into form number + serial.
+ *
+ * Splits on the LAST run of whitespace, so a form number can never swallow part of
+ * the serial. Returns null when there is no space — that is not a BC box barcode.
+ *   parseScan("CR5 0012345")      -> { form: "CR5", serial: "0012345" }
+ *   parseScan("  bp52634   991 ") -> { form: "BP52634", serial: "991" }
  */
-export function resolveScan(code, ctx) {
-  const { mode, boxes, poId } = ctx;
-  if (!mode || mode === 'off') return { ok: false, reason: 'off', message: 'Scanner mode is off — pick Receive, Open, or Sold out first.' };
-
-  const matches = boxes.filter((b) => b.serial && b.serial === code);
-  if (!matches.length) return { ok: false, reason: 'unknown', message: `Code "${code}" not recognized.` };
-
-  // A box the system believes is at a distributor or in storage cannot be opened
-  // or sold out on a floor it is not on. If the serial is physically in someone's
-  // hand then the RECORD is what's wrong, and the honest response is to say so
-  // rather than quietly transitioning it — an off-site box walked to sold_out
-  // stops being counted as owned and leaves inventory with no trace of why.
-  // Receiving is exempt: receiving is what puts a box somewhere in the first place.
-  if (mode !== 'receive') {
-    const here = matches.filter(isFloor);
-    if (!here.length) {
-      const b = matches[0];
-      return { ok: false, reason: 'offsite', box: b,
-        message: `That box is recorded as ${locationLabel(b.location)}`
-          + `${b.location_ref ? ' · ' + b.location_ref : ''}, not on the floor. `
-          + `Bring it in from Owned Inventory first.` };
-    }
-    return resolveOnFloor(code, { ...ctx, boxes: here });
-  }
-
-  if (mode === 'receive') {
-    const onOrder = matches.find((b) => b.state === 'on_order' && (!poId || b.po_id === poId));
-    if (onOrder) return { ok: true, action: 'receive', box: onOrder };
-    const already = matches.find((b) => b.state !== 'on_order');
-    if (already) return { ok: false, reason: 'duplicate', box: already, message: `Already received (${fmtWhen(already.received_at)}).` };
-    return { ok: false, reason: 'wrong_po', box: matches[0], message: 'That box belongs to a different order.' };
-  }
-
-  return resolveOnFloor(code, ctx);
+export function parseScan(code) {
+  const s = String(code ?? '').trim();
+  const m = s.match(/^(.+?)\s+(\S+)$/);
+  if (!m) return null;
+  const form = normCode(m[1]);
+  const serial = m[2].trim();
+  if (!form || !serial) return null;
+  return { form, serial };
 }
 
-/** The open / sold-out paths, once the box is known to be on the floor. */
-function resolveOnFloor(code, ctx) {
-  const { mode, boxes } = ctx;
-  const matches = boxes.filter((b) => b.serial && b.serial === code);
-  if (mode === 'open') {
-    const inInv = matches.find((b) => b.state === 'in_inventory');
-    if (inInv) return { ok: true, action: 'open', box: inInv };
-    const opened = matches.find((b) => b.state === 'opened');
-    if (opened) return { ok: false, reason: 'duplicate', box: opened, message: `Already opened (${fmtWhen(opened.opened_at)}).` };
-    return { ok: false, reason: 'wrong_state', box: matches[0], message: `Box is ${label(matches[0].state)} — can't open.` };
-  }
-
-  if (mode === 'soldout') {
-    const opened = matches.find((b) => b.state === 'opened');
-    if (opened) return { ok: true, action: 'soldout', box: opened };
-    const sold = matches.find((b) => b.state === 'sold_out');
-    if (sold) return { ok: false, reason: 'duplicate', box: sold, message: `Already marked sold out (${fmtWhen(sold.sold_out_at)}).` };
-    const inInv = matches.find((b) => b.state === 'in_inventory');
-    if (inInv) return { ok: false, reason: 'wrong_state', box: inInv, message: 'Box was never opened — open it first.' };
-    return { ok: false, reason: 'wrong_state', box: matches[0], message: `Box is ${label(matches[0].state)}.` };
-  }
-
-  return { ok: false, reason: 'off', message: 'Unknown scan mode.' };
+/**
+ * The game a form number belongs to. Matches the form number first, then the
+ * distributor's alternate code (vendor_sku), in case a distributor prints a
+ * different code on the box than the form number on the sheet.
+ */
+export function gameForForm(products, form) {
+  const f = normCode(form);
+  if (!f) return null;
+  return (products || []).find((p) => normCode(p.form_number) === f)
+    || (products || []).find((p) => p.vendor_sku && normCode(p.vendor_sku) === f)
+    || null;
 }
 
-const label = (s) => ({ on_order: 'still on order', in_inventory: 'in inventory', opened: 'opened', sold_out: 'sold out', missing: 'marked missing' }[s] || s);
+/** Every box of this game carrying this serial (normally zero or one). */
+export function boxesFor(boxes, productId, serial) {
+  const s = String(serial ?? '').trim();
+  return (boxes || []).filter((b) => b.product_id === productId && b.serial && String(b.serial).trim() === s);
+}
 
-function fmtWhen(iso) {
+/**
+ * Receive: what should happen to this scan?
+ *   { ok:true,  product, serial, placeholder? }   -> receive it (claim placeholder if given)
+ *   { ok:false, reason:'format',  message }
+ *   { ok:false, reason:'unknown_game', form, serial, message }  -> offer "Add game"
+ *   { ok:false, reason:'duplicate', box, message }
+ */
+export function resolveReceiveScan(code, { products, boxes, poId = null }) {
+  const parsed = parseScan(code);
+  if (!parsed) {
+    return { ok: false, reason: 'format', message: `"${code}" isn't a box barcode (expected form number, space, serial).` };
+  }
+  const product = gameForForm(products, parsed.form);
+  if (!product) {
+    return { ok: false, reason: 'unknown_game', form: parsed.form, serial: parsed.serial,
+      message: `Form ${parsed.form} isn't in the catalog yet — add the game.` };
+  }
+  const dup = boxesFor(boxes, product.id, parsed.serial).find((b) => b.state !== 'on_order');
+  if (dup) {
+    return { ok: false, reason: 'duplicate', box: dup, product,
+      message: `${product.name} #${parsed.serial} was already received (${fmtWhen(dup.received_at)}).` };
+  }
+  // claim a placeholder the PO created for this game, if there is one left
+  const placeholder = poId
+    ? (boxes || []).find((b) => b.po_id === poId && b.product_id === product.id && b.state === 'on_order')
+    : null;
+  return { ok: true, product, serial: parsed.serial, placeholder: placeholder || null,
+    onPo: poId ? !!placeholder || (boxes || []).some((b) => b.po_id === poId && b.product_id === product.id) : null };
+}
+
+/**
+ * Open: what should happen to this scan?
+ *   { ok:true, action:'open', box, product }
+ *   { ok:false, reason:'format'|'unknown_game'|'not_received'|'already_open'|'closed'|'wrong_state', ... }
+ * 'not_received' carries product + serial so the screen can offer receive-and-open.
+ */
+export function resolveOpenScan(code, { products, boxes }) {
+  const parsed = parseScan(code);
+  if (!parsed) {
+    return { ok: false, reason: 'format', message: `"${code}" isn't a box barcode (expected form number, space, serial).` };
+  }
+  const product = gameForForm(products, parsed.form);
+  if (!product) {
+    return { ok: false, reason: 'unknown_game', form: parsed.form, serial: parsed.serial,
+      message: `Form ${parsed.form} isn't in the catalog. Receive it first.` };
+  }
+  const hits = boxesFor(boxes, product.id, parsed.serial);
+  const inv = hits.find((b) => b.state === 'in_inventory');
+  if (inv) return { ok: true, action: 'open', box: inv, product };
+  const open = hits.find((b) => b.state === 'opened');
+  if (open) return { ok: false, reason: 'already_open', box: open, product, message: `${product.name} #${parsed.serial} is already open (since ${fmtWhen(open.opened_at)}).` };
+  const sold = hits.find((b) => b.state === 'sold_out' || b.state === 'closed_unsold');
+  if (sold) return { ok: false, reason: 'closed', box: sold, product, message: `${product.name} #${parsed.serial} was ${sold.state === 'sold_out' ? 'sold out' : 'closed'} — it can't be opened again.` };
+  if (hits.length) return { ok: false, reason: 'wrong_state', box: hits[0], product, message: `${product.name} #${parsed.serial} is ${label(hits[0].state)}.` };
+  return { ok: false, reason: 'not_received', product, serial: parsed.serial,
+    message: `${product.name} #${parsed.serial} was never received.` };
+}
+
+const label = (s) => ({ on_order: 'still on order', in_inventory: 'in inventory', opened: 'open', sold_out: 'sold out', closed_unsold: 'closed unsold', missing: 'marked missing' }[s] || s);
+
+export function fmtWhen(iso) {
   if (!iso) return 'earlier';
   const d = new Date(iso);
   return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });

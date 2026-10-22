@@ -25,7 +25,7 @@ globalThis.document = {
 };
 globalThis.performance ??= { now: () => 0 };
 
-const controls = process.argv.includes('--controls');
+const controls = process.argv.includes('');
 const out = join(tmpdir(), `inventory-${controls ? 'controls' : 'render'}-test-${process.pid}.cjs`);
 await build({
   entryPoints: [controls ? 'tests/catalog-controls.test.jsx' : 'tests/render.test.jsx'],

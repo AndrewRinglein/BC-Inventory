@@ -34,7 +34,7 @@ Deno.serve(async (req) => {
     if (!to) return Response.json({ error: 'no accounting/test address configured' }, { status: 400, headers: CORS });
 
     const [boxes, pos, payments] = await Promise.all([
-      sb.from('boxes').select('hall_id,product_id,serial,state,cost,received_at,opened_at,sold_out_at'),
+      sb.from('boxes').select('hall_id,product_id,serial,state,cost,received_on,received_at,opened_on,opened_at,sold_out_at,closed_at,tickets_remaining'),
       sb.from('purchase_orders').select('num,hall_id,vendor_id,status,subtotal,tax,total,sent_at'),
       sb.from('payments').select('hall_id,vendor_id,po_num,invoice_no,amount,status,created_at'),
     ]);
@@ -53,7 +53,7 @@ Deno.serve(async (req) => {
       body: JSON.stringify({
         from: cfg.fromAddress || 'onboarding@resend.dev',
         to: [to],
-        subject: `Bingo inventory weekly export — ${stamp}`,
+        subject: `BC inventory weekly export — ${stamp}`,
         text: body,
       }),
     });

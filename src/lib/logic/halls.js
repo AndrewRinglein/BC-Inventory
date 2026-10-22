@@ -1,7 +1,7 @@
 // Where a delivery actually goes.
 //
 // Each hall has one address that covers most orders, but not every vendor drops
-// at the same door — Redwood City takes some deliveries somewhere other than the
+// at the same door — some deliveries go somewhere other than the
 // hall itself. So a hall carries a default address plus optional per-vendor
 // overrides, and the PO prints whichever applies to the vendor it's going to.
 //

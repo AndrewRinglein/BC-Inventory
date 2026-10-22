@@ -142,3 +142,29 @@ select.needs-update { color:#8a6d1f; font-weight:600; }
   .paymaster table { page-break-inside: auto; }
   .paymaster tr { page-break-inside: avoid; }
 }
+
+/* ---- BC: compliance report print ---- */
+.report-head { margin-bottom: 14px; }
+@media print {
+  @page { size: landscape; margin: 0.4in; }
+  .no-print, .sidebar, .toast, .demo-banner, .scan-flash { display: none !important; }
+  .layout { display: block !important; }
+  .main { padding: 0 !important; margin: 0 !important; max-width: none !important; overflow: visible !important; }
+  body { background: #fff !important; }
+  .card { box-shadow: none !important; border: 1px solid #bbb !important; break-inside: avoid; }
+  .report .card { overflow: visible !important; }
+  .report-tbl { font-size: 7pt; width: 100% !important; table-layout: auto; }
+  .report-tbl th, .report-tbl td { padding: 2px 3px !important; white-space: normal !important; letter-spacing: 0 !important; }
+  .report-tbl th { font-size: 6.5pt !important; }
+  .report .stat-grid { grid-template-columns: repeat(8, 1fr) !important; gap: 6px !important; }
+  .report .stat { padding: 6px 8px !important; }
+  .report .stat label { font-size: 6pt !important; }
+  .report .stat .s { font-size: 6.5pt !important; }
+  .report-tbl thead { display: table-header-group; }
+  .report-tbl tr { break-inside: avoid; }
+  .stat-grid .stat .v { font-size: 11pt !important; }
+}
+.modal .field input, .modal .field select { width: 100%; box-sizing: border-box; }
+
+.report-tbl td.first { min-width: 130px; }
+.hall-switch button { white-space: nowrap; }

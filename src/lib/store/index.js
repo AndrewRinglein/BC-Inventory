@@ -3,24 +3,22 @@
 // Both stores expose the SAME interface, so every screen is written once:
 //   init(), isDemo
 //   auth:      signIn(email, pass), signOut(), getSession()
-//   catalog:   getVendors(), getProducts(), updateProduct(id, fields), addProduct(p)
+//   catalog:   getVendors(), addVendor(v), updateVendor(id, f), getProducts(), updateProduct(id, f), addProduct(p)
 //   orderQty:  getOrderQty(hallId), setOrderQty(hallId, productId, qty), clearOrderQty(hallId)
-//   pos:       createSentPos(hallId, drafts) -> pos[], getPos(hallId), getPoLines(poId),
-//              setPoStatus(poId, status)
-//   boxes:     getBoxes(hallId), updateBox(id, fields), transitionBox(id, toState),
-//              createBoxes(list), setBoxSession(ids, tag)
-//   receiving: createShipment(s), confirmShipment(shipmentId, summary), getReceiptDetail(shipmentId),
-//              uploadInvoicePhoto(file) -> path, getShipments(hallId)
-//   location:  moveBoxes({hallId, productId, from, to, qty, ref}), getOffsite(hallId),
-//              confirmOffsite(ids, on)   -- where stock IS, independent of its state
-//   hidden:    getHidden(hallId) -> productId[], setHidden(hallId, productId, hide, note)
-//              -- a hall's private view of the shared catalogue. DISPLAY ONLY.
+//   pos:       createSentPos(hallId, drafts, numbered, opts), getPos(hallId), getPoLines(poId),
+//              getPoLinesFor(ids), setPoStatus, repricePo, setPoArchived, deletePo
+//   boxes:     getBoxes(hallId), updateBox(id, f), transitionBox(id, to), createBoxes(list)
+//   BC floor:  receiveBox({...}), undoReceiveBox(id), openBox(id, {openedOn}), undoOpen(id),
+//              recordRemainder(id, n, {sessionDate}), undoRemainder(countId), soldOut(id),
+//              closeUnsold(id, n, {sessionDate}), reopenBox(id), getBoxCounts(hallId)
+//   receiving: createShipment(s), confirmShipment(id, summary), getShipments(hallId),
+//              getArrivals(hallId), getReceiptDetail(id), uploadInvoicePhoto(file)
+//   stock:     adjustStock({...}), addAdjustment({...}), getAdjustments(hallId)
 //   payments:  getPayments(hallId), addPayment(p), setPaymentStatus(id, status)
-//   emails:    sendEmails(list) -> logs (routes via edge function in prod, log-only in demo),
-//              getEmails(hallId)
+//   emails:    sendEmails(list, hallId) (edge function in prod, log-only in demo), getEmails(hallId)
 //   settings:  getSetting(key), setSetting(key, value)
-//   events:    getEvents(limit)
-//   ai:        readInvoicePhoto(pathOrDataUrl) -> extracted lines (edge fn / demo stub)
+//   events:    getEvents(limit), logEvent(kind, entity, id, detail)
+//   ai:        readInvoicePhoto(path) -> extracted lines (edge fn / demo stub)
 
 import { DemoStore } from './demoStore.js';
 import { SupabaseStore } from './supabaseStore.js';

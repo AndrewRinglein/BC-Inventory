@@ -15,7 +15,6 @@ import { REASONS, reasonLabel } from './Adjust.jsx';
  * forensics, and loading one invoice writes three hundred of them.
  */
 
-const HALLS = { sc: 'Santa Clara', rwc: 'Redwood City' };
 
 // how each kind reads to a person, and what colour it carries
 const KINDS = {
@@ -140,7 +139,7 @@ export default function History() {
   return (
     <div>
       <div className="page-head">
-        <div className="h1">History — {HALLS[hall]}</div>
+        <div className="h1">History</div>
         <div className="grow" />
         <span className="dimmer" style={{ fontSize: 12.5 }}>
           {loading ? 'loading…' : `${shown.length} of ${events.length}`}
@@ -262,7 +261,6 @@ export default function History() {
                         <span key={l.product_id + l.delta} style={{ marginRight: 14,
                           color: l.delta < 0 ? 'var(--orange)' : 'var(--green)' }}>
                           {l.delta > 0 ? '+' : '−'}{Math.abs(l.delta)} {l.game}
-                          {l.hall_id !== hall && <span className="dimmer"> ({HALLS[l.hall_id]})</span>}
                         </span>
                       ))}
                     </div>

@@ -3,7 +3,7 @@ import { AppCtx } from '../App.jsx';
 import { productsNeedingUpdate } from '../lib/logic/setup.js';
 
 export default function Sidebar() {
-  const { hall, setHall, screen, setScreen, payments, pos, products, store, role, roleLabel, can, IS_SANDBOX } = useContext(AppCtx);
+  const { screen, setScreen, payments, pos, products, boxes, store, role, roleLabel, can, IS_SANDBOX } = useContext(AppCtx);
   const demoHref = (on) => {
     const u = new URL(window.location.href);
     if (on) u.searchParams.set('demo', ''); else u.searchParams.delete('demo');
@@ -11,6 +11,7 @@ export default function Sidebar() {
   };
   const openPay = payments.filter((p) => p.status === 'open').length;
   const openPos = pos.filter((p) => p.status === 'sent' || p.status === 'partial').length;
+  const openBoxes = boxes.filter((b) => b.state === 'opened').length;
   const toUpdate = productsNeedingUpdate(products).length;
 
   const Item = ({ id, label, badge, gold, title }) => (
@@ -21,34 +22,26 @@ export default function Sidebar() {
   );
 
   return (
-    <div className="sidebar">
-      <div className="sb-title">Inventory &amp; Ordering</div>
+    <div className="sidebar no-print">
+      <div className="sb-title">BC Inventory</div>
       <div style={{ padding: '0 6px', marginBottom: 6 }}>
-        <span className={'badge ' + ({ admin: 'b-teal', accountant: 'b-gold', sc: 'b-green', rwc: 'b-green' }[role] || 'b-gray')}>{roleLabel}</span>
+        <span className={'badge ' + ({ admin: 'b-teal', accountant: 'b-gold', floor: 'b-green' }[role] || 'b-gray')}>{roleLabel}</span>
       </div>
-      <div className="sb-sec">Hall</div>
-      <div className="hall-switch">
-        <button className={hall === 'sc' ? 'on' : ''} onClick={() => setHall('sc')}>Santa Clara</button>
-        <button className={hall === 'rwc' ? 'on' : ''} onClick={() => setHall('rwc')}>Redwood City</button>
-      </div>
-      <Item id="dashboard" label="Dashboard" />
       <Item id="purchase" label="Purchase" />
+      <Item id="receive" label="Receive" title="Check in a delivery by scanning each box" />
+      <Item id="open" label="Open" badge={openBoxes || null}
+        title="Scan boxes onto the floor; sold out, remainder or close unsold" />
+      <Item id="reports" label="Reports" title="Compliance report: every box opened and closed, by day, range or month" />
       <div className="sb-sec">Track</div>
-      <Item id="assign" label="Assign Pre-Sale" title="Rack the flash games for a session and print the Paymaster sheet" />
-      <Item id="sessionuse" label="Session Use" title="What each session played, and taking it out of stock" />
-      <Item id="openboxes" label="Open Boxes" />
-      <Item id="inventory" label="Inventory"
-        title="Operational — what is on this hall's floor and can be played tonight. Never includes off-site stock." />
-      <Item id="owned" label="Owned Inventory"
-        title="Accounting — everything we own wherever it sits, floor and off-site shown separately. Never use this to decide what to order." />
+      <Item id="inventory" label="Inventory" />
       <Item id="orders" label="Open Orders" badge={openPos || null} />
       <Item id="accounting" label="Accounting" badge={openPay || null} />
-      <Item id="intake" label="Receiving" />
-      <Item id="history" label="History" title="Everything that has happened — adjustments, deliveries, orders, sessions" />
+      <Item id="history" label="History" title="Everything that has happened — receives, opens, closes, orders, adjustments" />
+      <Item id="dashboard" label="Dashboard" />
       <div className="sb-sec">Admin</div>
       <Item id="games" label={can('editCatalog') ? 'Add / Update Games' : 'Game Catalog'}
         badge={toUpdate || null} gold
-        title={toUpdate ? `${toUpdate} item${toUpdate === 1 ? '' : 's'} have a blank cost, ticket count or type` : ''} />
+        title={toUpdate ? `${toUpdate} game${toUpdate === 1 ? '' : 's'} have a blank cost, ticket count, form number or distributor` : ''} />
       {can('settings') && <Item id="settings" label="Settings" />}
       <div className="sb-sec">Training</div>
       {IS_SANDBOX ? (

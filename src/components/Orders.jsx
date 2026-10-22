@@ -1,10 +1,9 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react';
 import { AppCtx } from '../App.jsx';
-import { fmtMoney, poFromRecord, repriceFromCatalog, bySentDesc, fmtOrderDate, HALL_LABEL, HALL_SHORT } from '../lib/logic/po.js';
+import { fmtMoney, poFromRecord, repriceFromCatalog, bySentDesc, fmtOrderDate } from '../lib/logic/po.js';
 import { buildOrderEmails, poHtml, senderFor, PO_TEXT_DEFAULTS } from '../lib/logic/emails.js';
 import { addressResolver } from '../lib/logic/halls.js';
 
-const HALL_NAMES = { sc: 'Santa Clara', rwc: 'Redwood City' };
 
 const STATUS = {
   draft: ['b-gray', 'Draft'],
@@ -20,7 +19,7 @@ const statusOf = (p) => (p.recorded_only && p.status === 'sent'
   : STATUS[p.status]);
 
 export default function Orders() {
-  const { hall, pos, allPos, boxes, vendors, products, settings, store, reloadHall, setToast, setScreen, setReceivingPo, requirePin, can } = useContext(AppCtx);
+  const { hall, hallName, pos, allPos, boxes, vendors, products, settings, store, reloadHall, setToast, setScreen, setReceivingPo, requirePin, can } = useContext(AppCtx);
   const [sel, setSel] = useState(null);
   const [lines, setLines] = useState([]);
   const [emails, setEmails] = useState([]);
@@ -117,7 +116,7 @@ export default function Orders() {
     const useLines = resend.reprice && repriced ? repriced.lines : lines;
     const head = resend.reprice && repriced ? { ...cur, ...repriced.totals } : cur;
     const rec = poFromRecord(head, useLines, products);
-    return buildOrderEmails([rec], vendors, HALL_NAMES[hall],
+    return buildOrderEmails([rec], vendors, hallName,
       addressResolver(settings.halls_config, hall),
       null, senderFor(settings.sender, hall),
       { ...(settings.po_email || {}), ...resend.text })[0];
@@ -135,7 +134,7 @@ export default function Orders() {
   const printPo = () => {
     if (!cur || !lines.length) return;
     const rec = poFromRecord(cur, lines, products);
-    const html = poHtml(rec, vendorOf(cur), HALL_NAMES[hall],
+    const html = poHtml(rec, vendorOf(cur), hallName,
       addressResolver(settings.halls_config, hall),
       senderFor(settings.sender, hall), settings.po_email || {});
 
@@ -179,7 +178,7 @@ export default function Orders() {
   return (
     <div>
       <div className="page-head">
-        <div className="h1">Open Orders — {hall === 'sc' ? 'Santa Clara' : 'Redwood City'}</div>
+        <div className="h1">Open Orders</div>
         <div className="hall-switch" style={{ margin: 0 }}>
           <button className={view === 'active' ? 'on' : ''} onClick={() => { setView('active'); setSel(null); }}>
             Active ({pos.length})
@@ -199,7 +198,7 @@ export default function Orders() {
         <div className="card" style={{ overflow: 'hidden' }}>
           <table className="tbl">
             <thead><tr>
-              <th className="first">PO #</th><th style={{ width: 48 }}>Hall</th>
+              <th className="first">PO #</th>
               <th>Distributor</th><th style={{ width: 62 }} title="The day it went to the distributor">Sent</th>
               <th>Status</th><th className="r last">Total</th>
             </tr></thead>
@@ -208,9 +207,6 @@ export default function Orders() {
                 <tr key={p.id} onClick={() => setSel(p.id)}
                   style={{ cursor: 'pointer', background: cur?.id === p.id ? '#eef3f5' : 'transparent' }}>
                   <td className="first mono" style={{ fontSize: 12 }}>{p.num}</td>
-                  <td className="dimmer" style={{ fontSize: 11 }} title={HALL_LABEL[p.hall_id] || p.hall_id}>
-                    {HALL_SHORT[p.hall_id] || p.hall_id}
-                  </td>
                   <td style={{ fontSize: 12 }}>{vmap[p.vendor_id]?.name}</td>
                   <td className="mono" style={{ fontSize: 11.5 }}
                       title={p.sent_at ? `Sent ${new Date(p.sent_at).toLocaleString()}`
@@ -251,7 +247,7 @@ export default function Orders() {
               </span>
               <div style={{ flex: 1 }} />
               {can('receive') && (cur.status === 'sent' || cur.status === 'partial') && (
-                <button className="btn primary sm" onClick={() => { setReceivingPo(cur.id); setScreen('intake'); }}>Receive delivery →</button>
+                <button className="btn primary sm" onClick={() => { setReceivingPo(cur.id); setScreen('receive'); }}>Receive delivery →</button>
               )}
               {can('receive') && cur.status === 'partial' && (
                 <button className="btn ghost sm" onClick={closeShort}>Close short</button>

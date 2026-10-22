@@ -2,7 +2,6 @@ import React, { useContext, useMemo, useState } from 'react';
 import { AppCtx } from '../App.jsx';
 import { fmtMoney } from '../lib/logic/po.js';
 import { perBoxValue, stockUnit } from '../lib/logic/pricing.js';
-import { isFloor } from '../lib/logic/location.js';
 
 /**
  * Record a stock change and say why.
@@ -25,19 +24,15 @@ export const REASONS = [
   { id: 'miscount', label: 'Miscount',              hint: 'The shelf and the system disagree, no other explanation' },
   { id: 'found',    label: 'Found',                 hint: 'Turned up in the back room' },
   { id: 'returned', label: 'Returned to distributor', hint: 'Sent back for credit' },
-  { id: 'transfer', label: 'Transferred to other hall', hint: 'Moved between Santa Clara and Redwood City', crossHall: true },
 ];
 export const reasonLabel = (id) => REASONS.find((r) => r.id === id)?.label || id;
-
-const HALLS = { sc: 'Santa Clara', rwc: 'Redwood City' };
 
 /** Type-ahead over the catalog. Stocked games first — that's what usually moves. */
 function GamePick({ value, onPick, hall, boxes, products, placeholder }) {
   const [q, setQ] = useState('');
   const stocked = useMemo(() => {
     const n = {};
-    // floor only — you cannot adjust a box sitting in a distributor's warehouse
-    for (const b of boxes) if (b.hall_id === hall && b.state === 'in_inventory' && isFloor(b)) n[b.product_id] = (n[b.product_id] || 0) + 1;
+    for (const b of boxes) if (b.hall_id === hall && b.state === 'in_inventory') n[b.product_id] = (n[b.product_id] || 0) + 1;
     return n;
   }, [boxes, hall]);
   const hits = useMemo(() => {
@@ -92,13 +87,12 @@ export default function Adjust({ onClose, preset }) {
   const [busy, setBusy] = useState(false);
 
   const meta = REASONS.find((r) => r.id === reason) || REASONS[0];
-  const otherHall = hall === 'sc' ? 'rwc' : 'sc';
   // "found" only adds; everything else takes off the shelf, and a swap does both
   const addsOnly = reason === 'found';
-  const twoSided = meta.twoSided || meta.crossHall;
+  const twoSided = meta.twoSided;
 
   const stockOf = (p) => (p ? boxes.filter((b) => b.hall_id === hall && b.product_id === p.id
-    && b.state === 'in_inventory' && isFloor(b)).length : 0);
+    && b.state === 'in_inventory').length : 0);
   const nOut = Math.max(0, parseInt(outN) || 0);
   const nIn = Math.max(0, parseInt(inN) || 0);
   const short = !addsOnly && outP && nOut > stockOf(outP);
@@ -117,9 +111,6 @@ export default function Adjust({ onClose, preset }) {
         if (!inP || !nIn) { setToast('Pick the game they gave you instead'); return; }
         lines.push({ product_id: inP.id, delta: nIn });
       }
-      if (reason === 'transfer') {
-        lines.push({ product_id: outP.id, delta: nOut, hall_id: otherHall });
-      }
     }
     if (!(await requirePin())) return;
     setBusy(true);
@@ -137,7 +128,7 @@ export default function Adjust({ onClose, preset }) {
     <div className="modal-bg" onClick={() => !busy && onClose()}>
       <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <div style={{ fontWeight: 700, fontSize: 15 }}>Adjust stock — {HALLS[hall]}</div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Adjust stock</div>
         </div>
         <div className="modal-body">
           <div className="field">
@@ -185,18 +176,12 @@ export default function Adjust({ onClose, preset }) {
             </div>
           )}
 
-          {reason === 'transfer' && (
-            <div className="dimmer" style={{ fontSize: 11.5, marginTop: 4 }}>
-              Leaves {HALLS[hall]} and arrives at {HALLS[otherHall]} as one record.
-            </div>
-          )}
-
           <div className="field" style={{ marginTop: 12 }}>
             <label>Note — what happened? (required)</label>
             <input type="text" value={note} placeholder={
-              reason === 'swap' ? 'e.g. Scott was out of Enchiladas, sent Heroes instead'
+              reason === 'swap' ? 'e.g. they were out of Lucky Puppy, sent Best Friends instead'
                 : reason === 'damaged' ? 'e.g. water damage in the back room'
-                : 'e.g. found behind the paper stock'}
+                : 'e.g. found in the back room'}
               onChange={(e) => setNote(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && save()} style={{ width: '100%' }} />
           </div>
@@ -209,13 +194,10 @@ export default function Adjust({ onClose, preset }) {
                   : <>
                       −{nOut} {outP.name}
                       {reason === 'swap' && inP && <> &nbsp;→&nbsp; +{nIn} {inP.name}</>}
-                      {reason === 'transfer' && <> &nbsp;→&nbsp; {HALLS[otherHall]}</>}
                       <div className="dimmer" style={{ marginTop: 3, fontSize: 11.5 }}>
-                        {reason === 'transfer'
-                          ? 'No change in total value — it moves halls.'
-                          : <>value {reason === 'swap' && inP
-                              ? fmtMoney(nIn * perBoxValue(inP) - nOut * perBoxValue(outP))
-                              : fmtMoney(-nOut * perBoxValue(outP))}</>}
+                        value {reason === 'swap' && inP
+                          ? fmtMoney(nIn * perBoxValue(inP) - nOut * perBoxValue(outP))
+                          : fmtMoney(-nOut * perBoxValue(outP))}
                       </div>
                     </>}
               </div>

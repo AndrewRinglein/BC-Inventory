@@ -1,72 +1,67 @@
-# Bingo Inventory & Ordering
+# BC Inventory
 
-Inventory, ordering, receiving, and box-lifecycle tracking for two bingo halls
-(Santa Clara and Redwood City), run from one PC per hall.
+Box tracking for BC's flash (pull-tab) tickets, from purchase order to sold out, with the
+compliance report built from the floor scans. Copied from the bingo
+[Inventory-Management](https://github.com/AndrewRinglein/Inventory-Management) app at commit
+`e7dabdc` and reworked for BC; it shares no database, deployment or code path with it.
 
-Built July 2026 from the approved mockup. See `SETUP.md` for going live.
+See `SETUP.md` for going live and `docs/SPEC.md` for the product spec.
 
 ## What it does
 
-- **Purchase** — order builder over the full 4-vendor catalog (348 games with ticket counts
-  and $/ticket); quantities persist per hall; review generates up to 8 emails
-  (4 vendor POs + 4 accounting copies), editable, sent only on "Send all".
-- **Receiving** — pick the PO, photograph the delivery invoice (AI pre-fills line items),
-  check in boxes with serials, confirm → reconciliation (received / missing) → shortage email
-  to the vendor + delivered-$ email to accounting + payment record.
-- **Inventory** — live per-game counts (in stock / opened / on order / value), sortable
-  headers, game search, set-asides for sessions, one-click Open.
-- **Open Boxes** — scan modes (Open / Sold out) for the barcode scanner, manual serial
-  lookup, sold-out and back-to-stock actions.
-- **Accounting** — payments created from actual deliveries, short-delivery flags, mark paid.
-- **Add / Update Games** — catalog editing with tickets + $/ticket columns and filters;
-  price edits PIN-protected.
-- **Scanner** — any USB/Bluetooth keyboard-wedge scanner works; burst detection, duplicate
-  protection, 10-second undo, beep + screen flash.
+- **Purchase** — order builder over the game catalog; one PO per distributor, review then send
+  (or record a PO placed by phone). A game with no cost yet goes out as "?".
+- **Receive** — set the day received, invoice number and (optionally) the PO, then scan. Each
+  scan (`<form number> <serial>`) puts the box in stock immediately; with a PO it claims one of
+  the boxes that PO put on order. An unknown form number opens **Add game**. **Done** works out
+  what is still missing and builds the shortage / amount-to-pay emails.
+- **Open** — pick the session date and scan a box to open it (date + exact time recorded). Every
+  open box ends as **Sold out**, a **Remainder** (tickets left; it stays open into the next
+  session, every count kept) or **Close unsold** (retired with tickets left).
+- **Reports** — the compliance report: every box closed (or opened) in a day, range or month,
+  with serial, open and close times, receipt invoice, and the ticket-sheet attributes as they
+  were when the box was received. Summary cards, sort on any column, print, CSV.
+- **Inventory, Open Orders, Accounting, History, Dashboard, Games, Settings** — carried over from
+  the bingo app, simplified to one location and box-only games.
 
 ## Architecture
 
 - React (Vite) single-page app — `src/`
-- Supabase: Postgres (schema + seed in `supabase/migrations/`), auth, storage,
+- Supabase: Postgres (`supabase/migrations/001_bc_schema.sql` + `002_bc_seed.sql`), auth, storage,
   edge functions (`send-email`, `read-invoice`, `weekly-export`)
-- **Demo mode**: with no `.env`, the app runs entirely in the browser (localStorage) with the
-  seeded catalog — same UI, emails logged not sent. Password: `bingo`.
+- **Demo mode**: with no `.env`, the app runs in the browser (localStorage) with the 38-game
+  catalog. Password: `boxes`. Add `&demo` to any link for the training sandbox (fake data at every
+  stage, "Reset demo data" button).
 - One store interface, two implementations: `src/lib/store/demoStore.js`,
   `src/lib/store/supabaseStore.js`. Screens never know which is active.
-- Box lifecycle (`on_order → in_inventory → opened → sold_out`, + `missing`) enforced twice:
-  in `src/lib/logic/boxes.js` and by a Postgres trigger.
-- Every change to boxes, POs, products, payments is audited to the `events` table by DB trigger.
+- Box lifecycle `on_order → in_inventory → opened → sold_out | closed_unsold` (+ `missing`),
+  enforced in `src/lib/logic/boxes.js` and by the `guard_box_state` trigger, which also stamps the
+  open / sold-out / closed times server-side.
+- Remainder counts live in `box_counts` (never edited); the latest is on `boxes.tickets_remaining`.
+- Every change to boxes, counts, POs, games and payments is audited to `events` by trigger; the
+  app also logs a readable line for each action (History).
+- Scanner: any USB/Bluetooth keyboard-wedge scanner. Burst detection in `src/lib/logic/scan.js`;
+  one scan = form number, space, serial.
 
 ## Commands
 
 ```
 npm install       # once
-npm run dev       # local development
+npm run dev       # local development (demo mode without .env)
 npm run build     # production build -> dist/
-npm test          # 16 unit tests: PO math, numbering, state machine, scan resolver, emails
+npm test          # logic + store tests, render checks, code guards
+npm run deploy    # build for GitHub Pages (/BC-Inventory/) and publish via the .ghp worktree
 ```
 
-## Roles (v1.1)
+## Roles
 
-Role comes from the URL — distribute one bookmark per person (a shared site password still
-gates entry; this is deliberately lightweight, per decision):
+Role comes from the URL — one bookmark per person; a shared site password still gates entry.
 
 | Link | Role | Can |
 |---|---|---|
-| `/?role=admin` | Super Admin | everything, incl. catalog edits + Settings |
-| `/?role=sc` | Inventory Master — Santa Clara | order, receive, scan, set-aside **in SC**; RWC read-only |
-| `/?role=rwc` | Inventory Master — Redwood City | same, halls reversed |
-| `/?role=accountant` | Accountant | read everything, mark invoices paid; no POs, no inventory changes |
+| `/?role=admin` | Admin | everything, incl. catalog values, costs and Settings |
+| `/?role=floor` | Floor / Inventory | Purchase, Receive, Open, Inventory, Reports; fill blank catalog fields |
+| `/?role=accountant` | Accountant | read everything, Reports, mark invoices paid |
 
-Add `&demo` to any link for **test mode** — a staged sandbox (browser-local, fake data at every
-lifecycle stage: sent/partial/closed POs, boxes in all states, open + paid invoices) with a
-"Reset demo data" button. The real database is never touched from a demo link.
-
-Note: because roles live in the URL by design, enforcement is in the app layer (UI + client
-checks + audit trail), not the database — anyone with the admin link has admin. This was an
-explicit trade-off for simplicity; upgrading to real per-user logins later is a contained change.
-
-## Security decisions (as agreed)
-
-Review-then-send on all emails (no extra confirm dialogs); test mode routes everything to one
-inbox until switched off. Admin PIN (default **1234 — change it**) guards Settings, prices,
-vendor addresses. Hall PCs stay signed in. Weekly export email + Supabase daily backups.
+Enforcement is in the app layer (as in the bingo app) — anyone with the admin link has admin.
+Admin PIN (default **1234 — change it**) guards Settings and cost changes.

@@ -19,10 +19,10 @@ export default function Login({ onLogin }) {
   return (
     <div className="login-wrap">
       <form className="login-box" onSubmit={submit}>
-        <div style={{ fontSize: 30 }}>🎱</div>
-        <h1 style={{ fontSize: 19, margin: '8px 0 4px' }}>Bingo Inventory &amp; Ordering</h1>
+        <div style={{ fontSize: 30 }}>📦</div>
+        <h1 style={{ fontSize: 19, margin: '8px 0 4px' }}>BC Inventory</h1>
         <p className="dim" style={{ fontSize: 13, marginBottom: 18 }}>
-          {IS_DEMO ? 'Demo mode — password is "bingo"' : 'Sign in to continue'}
+          {IS_DEMO ? 'Demo mode — password is "boxes"' : 'Sign in to continue'}
         </p>
         {!IS_DEMO && (
           <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)}

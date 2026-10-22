@@ -1,7 +1,6 @@
 // Purchase-order math and numbering. Pure functions — unit tested in tests/logic.test.js.
 
-import { perBoxValue, baseCost, packUnits, packingFor } from './pricing.js';
-import { packColorList } from '../../data/variety-packs.js';
+import { perBoxValue, baseCost, packUnits, packingFor } from './pricing.js';  // eslint-disable-line no-unused-vars
 
 // Coerces first. A Postgres numeric arrives as a string, and "58.80" + 4 is
 // "58.804" — arithmetic that looks like arithmetic and silently is not.
@@ -25,18 +24,16 @@ export const ticketPrice = (p) => Number(p?.price_per_ticket) || 1;
 export const sumMoney = (rows, pick = (r) => r) =>
   round2(rows.reduce((a, r) => a + (Number(pick(r)) || 0), 0));
 
-/** Display name for a PO line: cleaned name + (tickets/$price) so vendors see the full spec. */
+/**
+ * Display name for a PO line: name + form number + ticket count, so the distributor
+ * sees exactly which game (two games can share a name — there are two Wildball
+ * Flashboards — but never a form number).
+ */
 export function lineName(product) {
-  const base = product.tickets
-    ? `${product.name} (${product.tickets}/$${product.price_per_ticket || 1})`
-    : product.name;
-  // A variety pack has to name its colours ON THE ORDER, not just in whatever
-  // renders it later. "One colour pack" is not something a distributor can pick,
-  // and a list resolved at display time would restate an old PO with today's
-  // colours the first time the pack changes. Same reason the name is snapshotted
-  // at all. Second line, so the table column stays the width of a name.
-  const colors = packColorList(product.id);
-  return colors ? `${base}\ncolours: ${colors}` : base;
+  const bits = [];
+  if (product.form_number) bits.push(`form ${product.form_number}`);
+  if (product.tickets) bits.push(`${product.tickets}/$${product.price_per_ticket || 1}`);
+  return bits.length ? `${product.name} (${bits.join(', ')})` : product.name;
 }
 
 /** The first line of a snapshot — the name itself, without any colour list under it. */
@@ -85,11 +82,11 @@ export function poTotals(lines, taxRate) {
   };
 }
 
-export const VENDOR_CODES = { bv: 'BV', md: 'MD', cbs: 'CBS', pbf: 'PBF' };
+export const VENDOR_CODES = { lib: 'LIB', tm: 'TM', clk: 'CLK', lan: 'LAN' };
 
 /**
- * Next PO number, e.g. SC-26-08-27-BV-014.
- * seq is a plain object persisted in settings ('po_sequence'): { "SC-BV": 13, ... }
+ * Next PO number, e.g. BC-26-10-22-LIB-014.
+ * seq is a plain object persisted in settings ('po_sequence'): { "BC-LIB": 13, ... }
  * Returns { num, seq } with the incremented sequence (caller persists it).
  */
 export function nextPoNum(seq, hallId, vendorId, date = new Date()) {
@@ -124,19 +121,18 @@ export function buildDrafts(qty, products, vendors) {
     if (!p.vendor_id || p.vendor_id === 'unknown') continue;
     (byVendor[p.vendor_id] ||= []).push({
       product_id: pid, name_snapshot: lineName(p), qty: n,
-      // Number() on the way IN, not just in the test above it. Keeping the raw
-      // string here made poTotals concatenate it against the packing and quietly
-      // drop packing from every subtotal, tax and total.
+      // Number() on the way IN: a Postgres numeric arrives as a string, and a
+      // string cost concatenates instead of adding in poTotals.
       cost: Number(p.cost) > 0 ? Number(p.cost) : 0,
       price_tbd: !(Number(p.cost) > 0),   // ordered before we knew the price
       kind: 'item',
-      base_cost: baseCost(p),
-      pack_units: packUnits(p),
-      packing_each: packingFor(p, vmap[p.vendor_id]),
-      // one ordered unit can arrive as several inventory boxes, each worth a share
-      split_boxes: Math.max(1, parseInt(p.split_boxes) || 1),
+      // BC boxes are one box each: no deals, packing or splits. Kept on the line so
+      // the shared email / reprint / reprice code reads the shape it was written for.
+      base_cost: Number(p.cost) > 0 ? Number(p.cost) : 0,
+      pack_units: 1,
+      packing_each: 0,
+      split_boxes: 1,
       per_box_cost: perBoxValue(p),
-      // supplies are resold to players, so they come to us exempt (see poTotals)
       taxable: p.taxable !== false,
     });
   }
@@ -276,5 +272,5 @@ export function fmtOrderDate(po) {
   return dt.toLocaleDateString([], { day: 'numeric', month: 'short' });
 }
 
-export const HALL_LABEL = { sc: 'Santa Clara', rwc: 'Redwood City' };
-export const HALL_SHORT = { sc: 'SC', rwc: 'RWC' };
+export const HALL_LABEL = { bc: 'BC' };
+export const HALL_SHORT = { bc: 'BC' };

@@ -1,1999 +1,414 @@
+// BC Inventory — logic and store tests. Run with: npm test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { poTotals, nextPoNum, buildDrafts, lineName, round2, packingLine, fmtMoney, ticketPrice,
-  snapshotHead, snapshotRest } from '../src/lib/logic/po.js';
-import { canTransition, transition, countByProduct } from '../src/lib/logic/boxes.js';
-import { resolveScan } from '../src/lib/logic/scan.js';
-import { buildOrderEmails, buildDeliveredEmail, buildShortageEmail, senderFor } from '../src/lib/logic/emails.js';
-import { isMisc, passesFilters } from '../src/lib/logic/categories.js';
-import { needsSetup, needsCost, needsType, needsTickets, needsAnyUpdate, needsVendor, UNKNOWN_VENDOR, productsNeedingSetup } from '../src/lib/logic/setup.js';
-import { isGrabBag } from '../src/lib/logic/categories.js';
-import { priceParts, boxCost, baseCost, packUnits, packingFor } from '../src/lib/logic/pricing.js';
-import { receivedLine, missingLine, extraLine, perUnitOf, lineSplit } from '../src/lib/logic/receiving.js';
-import { writeOffCost, wantedFromPlays, consumeOrder } from '../src/lib/logic/session.js';
-import { coverShortage, shortageAdvice, onFloor, playable, daysSinceConfirmed }
-  from '../src/lib/logic/location.js';
-import { DemoStore } from '../src/lib/store/demoStore.js';
+// the demo store keeps its data in localStorage
+const mem = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+  setItem: (k, v) => mem.set(k, String(v)),
+  removeItem: (k) => mem.delete(k),
+};
 
-/**
- * A hall with one box of Bingo Bandit, none of Cash Cow, one of Ditto Dog, and an
- * unapplied session to run against it. Built through DemoStore so the test drives
- * the same applySession the app does — a local re-implementation would let the
- * real one regress with the suite still green, which is how the last fix slipped.
- */
-function shortStore() {
-  const s = new DemoStore();
-  s.db = {
-    halls: [{ id: 'sc', name: 'Santa Clara' }],
-    products: [
-      { id: 'G1', name: 'Bingo Bandit', base_cost: 100, pack_units: 1, split_boxes: 1 },
-      { id: 'G2', name: 'Cash Cow', base_cost: 80, pack_units: 1, split_boxes: 1 },
-      { id: 'G3', name: 'Ditto Dog', base_cost: 60, pack_units: 1, split_boxes: 1 },
-    ],
-    boxes: [
-      { id: 'b1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' },
-      { id: 'b3', hall_id: 'sc', product_id: 'G3', state: 'in_inventory' },
-    ],
-    sessions: [{ id: 's1', hall_id: 'sc', session_date: '2026-08-10', part: '', applied_at: null }],
-    session_plays: [], events: [], settings: {},
-  };
-  s._save = () => {};
-  return s;
-}
+const { poTotals, nextPoNum, buildDrafts, lineName, fmtMoney } = await import('../src/lib/logic/po.js');
+const { canTransition, transition, countByProduct, closedAt } = await import('../src/lib/logic/boxes.js');
+const { parseScan, gameForForm, resolveReceiveScan, resolveOpenScan, normCode } = await import('../src/lib/logic/scan.js');
+const { checkCount, ticketsIn, gameSnapshot, gameOf, atLocalNoonIso, localYmd } = await import('../src/lib/logic/bc.js');
+const { needsCost, needsTickets, needsForm, needsVendor, needsAnyUpdate } = await import('../src/lib/logic/setup.js');
+const { buildReport, monthBounds, inPeriod } = await import('../src/lib/logic/report.js');
+const { buildDeliveredEmail, buildShortageEmail } = await import('../src/lib/logic/emails.js');
+const { receivedLine, missingLine } = await import('../src/lib/logic/receiving.js');
+const { CATALOG } = await import('../src/data/catalog.js');
+const { DemoStore } = await import('../src/lib/store/demoStore.js');
 
-// ---------- PO math ----------
-test('poTotals matches spreadsheet math (9.75% tax)', () => {
-  // From the SC sheet: Pacific block totaled 1179.00 -> tax 114.9525 -> 1293.9525
-  const lines = [{ qty: 1, cost: 1179 }];
-  const t = poTotals(lines, 0.0975);
-  assert.equal(t.subtotal, 1179);
-  assert.equal(t.tax, 114.95);           // rounded to cents at PO level
-  assert.equal(t.total, 1293.95);
+const G = (over = {}) => ({
+  id: 'G1', name: '4 Corner - $500', form_number: 'CR3', vendor_id: 'lib', cost: 0, tickets: 945,
+  price_per_ticket: 1, ideal_gross_receipts: 945, ideal_cash_prize: 665, ideal_profit: 280,
+  non_cash_prize_value: 0, net_profit: 280, progressive_amount: 0, active: true, ...over,
+});
+const G2 = G({ id: 'G2', name: 'Jackpot Derby', form_number: '52266', vendor_id: 'clk', cost: 470, tickets: 1806,
+  ideal_gross_receipts: 1806, ideal_cash_prize: 1400, ideal_profit: 406, net_profit: 406, progressive_amount: 300 });
+const vendors = [{ id: 'lib', name: 'Liberty Gaming', email: 'l@x.com', tax_rate: 0 }, { id: 'clk', name: 'Clarko', email: 'c@x.com', tax_rate: 0 }];
+
+// ---------------------------------------------------------------- catalog seed
+test('the seed has all 38 games from the sheet, one per form number', () => {
+  assert.equal(CATALOG.products.length, 38);
+  const forms = CATALOG.products.map((p) => normCode(p.form));
+  assert.equal(new Set(forms).size, 38);
+});
+test('ticket count equals ideal gross receipts ($1 per ticket)', () => {
+  for (const p of CATALOG.products) assert.equal(p.tickets, p.igr, p.name);
+});
+test('"Libery Gaming" is merged into Liberty Gaming', () => {
+  assert.equal(CATALOG.vendors.length, 4);
+  assert.equal(CATALOG.products.filter((p) => p.vendor === 'lib').length, 19);
+});
+test('the colour-split progressive is stored as its total with the breakdown kept', () => {
+  const f = CATALOG.products.find((p) => p.name === 'Freedom Flashboard');
+  assert.equal(f.prog, 350);
+  assert.equal(f.progNote, 'Red: 200, White: 100, Blue: 50');
+});
+test('numeric form numbers are stored as text', () => {
+  assert.equal(CATALOG.products.find((p) => p.name === 'Jackpot Derby').form, '52266');
 });
 
-test('poTotals sums multiple lines and rounds once', () => {
-  const t = poTotals([{ qty: 4, cost: 86.4 }, { qty: 6, cost: 86.4 }, { qty: 3, cost: 60 }], 0.0975);
-  assert.equal(t.subtotal, round2(345.6 + 518.4 + 180));   // 1044
-  assert.equal(t.total, round2(1044 * 1.0975));
+// ---------------------------------------------------------------- scanning
+test('a scan splits into form number and serial on the last space', () => {
+  assert.deepEqual(parseScan('CR3 0012345'), { form: 'CR3', serial: '0012345' });
+  assert.deepEqual(parseScan('  bp52634   991 '), { form: 'BP52634', serial: '991' });
+  assert.deepEqual(parseScan('52266\t000777'), { form: '52266', serial: '000777' });
+});
+test('a scan with no space is not a box barcode', () => {
+  assert.equal(parseScan('CR30012345'), null);
+  assert.equal(parseScan(''), null);
+});
+test('serials keep their leading zeros', () => {
+  assert.equal(parseScan('CR3 000001').serial, '000001');
+});
+test('form numbers match case-insensitively, then by the alternate code', () => {
+  const ps = [G(), G2, G({ id: 'G3', form_number: 'XCR2', vendor_sku: 'ALT-9' })];
+  assert.equal(gameForForm(ps, 'cr3').id, 'G1');
+  assert.equal(gameForForm(ps, '52266').id, 'G2');
+  assert.equal(gameForForm(ps, 'alt-9').id, 'G3');
+  assert.equal(gameForForm(ps, 'NOPE'), null);
 });
 
-test('PO numbering increments per hall+vendor and pads', () => {
-  const d = new Date('2026-08-01T12:00:00');
-  let r = nextPoNum({}, 'sc', 'bv', d);
-  assert.equal(r.num, 'SC-26-08-01-BV-001');
-  r = nextPoNum(r.seq, 'sc', 'bv', d);
-  assert.equal(r.num, 'SC-26-08-01-BV-002');
-  const r2 = nextPoNum(r.seq, 'rwc', 'bv', d);
-  assert.equal(r2.num, 'RWC-26-08-01-BV-001');    // independent sequence
-  const r3 = nextPoNum(r2.seq, 'sc', 'cbs', d);
-  assert.equal(r3.num, 'SC-26-08-01-CBS-001');
+test('receive: an unknown form number asks for the game to be added', () => {
+  const r = resolveReceiveScan('ZZ9 1', { products: [G()], boxes: [] });
+  assert.equal(r.reason, 'unknown_game');
+  assert.equal(r.form, 'ZZ9');
+  assert.equal(r.serial, '1');
 });
-
-test('the PO number carries the day, and rolls without help', () => {
-  // The whole reason for the format: every order this system has ever made falls
-  // inside one month, so a number showing only the month made the orders list read
-  // as one repeated date. The day is what distinguishes them.
-  const on = (iso) => nextPoNum({ 'SC-BV': 9 }, 'sc', 'bv', new Date(iso + 'T12:00:00')).num;
-  assert.equal(on('2026-08-27'), 'SC-26-08-27-BV-010');
-  assert.equal(on('2026-09-01'), 'SC-26-09-01-BV-010', 'month rolls on its own');
-  assert.equal(on('2027-01-03'), 'SC-27-01-03-BV-010', 'and so does the year');
-  assert.equal(on('2026-10-05'), 'SC-26-10-05-BV-010', 'single digits stay padded');
-  // two orders to the same distributor on the same day must not collide
-  const first = nextPoNum({}, 'sc', 'bv', new Date('2026-08-27T09:00:00'));
-  const second = nextPoNum(first.seq, 'sc', 'bv', new Date('2026-08-27T17:00:00'));
-  assert.notEqual(first.num, second.num);
-  assert.equal(second.num, 'SC-26-08-27-BV-002');
+test('receive: a known game with a new serial is received', () => {
+  const r = resolveReceiveScan('CR3 100', { products: [G()], boxes: [] });
+  assert.equal(r.ok, true);
+  assert.equal(r.product.id, 'G1');
+  assert.equal(r.placeholder, null);
 });
-
-const products = [
-  { id: 'P1', vendor_id: 'bv', name: 'Big Fish', cost: 117.3, tickets: 1995, price_per_ticket: 1, type: 'flash', packing_units: 1 },
-  { id: 'P2', vendor_id: 'bv', name: 'Casino City', cost: 230.5, tickets: 1960, price_per_ticket: 2, type: 'flash', packing_units: 1 },
-  { id: 'P3', vendor_id: 'md', name: 'Moolah', cost: 120, tickets: 2400, price_per_ticket: 1, type: 'flash', packing_units: 1 },
-  { id: 'P4', vendor_id: 'md', name: 'Fat Kitty', cost: 89.1, tickets: null, price_per_ticket: 1, type: 'flash', packing_units: 1 },
-];
-const vendors = [
-  { id: 'bv', name: 'Bingo Vision', email: 'bv@x.com', contact_name: 'Scott', tax_rate: 0.0975 },
-  { id: 'md', name: 'Marathon', email: 'md@x.com', contact_name: 'Esteban', tax_rate: 0.0975 },
-];
-const SENDER = { name: 'Sagit', org: 'Vanguard' };
-
-test('buildDrafts groups by vendor, skips zero qty, locks prices', () => {
-  const drafts = buildDrafts({ P1: 2, P2: 0, P3: 1 }, products, vendors);
-  assert.equal(drafts.length, 2);
-  const bv = drafts.find((d) => d.vendor_id === 'bv');
-  assert.equal(bv.lines.length, 1);
-  assert.equal(bv.lines[0].cost, 117.3);
-  assert.equal(bv.subtotal, 234.6);
+test('receive: the same game + serial twice is a duplicate', () => {
+  const boxes = [{ id: 'b', product_id: 'G1', serial: '100', state: 'in_inventory' }];
+  assert.equal(resolveReceiveScan('CR3 100', { products: [G()], boxes }).reason, 'duplicate');
 });
-
-// ---------- per-vendor packing charge ----------
-const bvFee = { id: 'bv', name: 'Bingo Vision', email: 'bv@x.com', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 4, packing_types: 'flash' };
-const vendorsFee = [bvFee, { id: 'md', name: 'Marathon', email: 'md@x.com', tax_rate: 0.0975 }];
-
-test('packing rides on the line that earned it, not a lump at the bottom', () => {
-  const [d] = buildDrafts({ P1: 2, P2: 3 }, products, vendorsFee);   // both bv flash, 1 unit each
-  assert.ok(!d.lines.some((l) => l.kind === 'fee'), 'no separate packing line any more');
-  for (const l of d.lines) assert.equal(l.packing_each, 4, 'each flash box carries its own $4');
-  assert.equal(d.subtotal, round2(2 * (117.3 + 4) + 3 * (230.5 + 4)));
+test('receive: the same serial on a DIFFERENT game is not a duplicate', () => {
+  const boxes = [{ id: 'b', product_id: 'G2', serial: '100', state: 'in_inventory' }];
+  assert.equal(resolveReceiveScan('CR3 100', { products: [G(), G2], boxes }).ok, true);
 });
-
-test('a case that packs 80 units carries $320 on its own line', () => {
-  const cases = [{ id: 'C80', vendor_id: 'bv', name: '10-Pack of strips Biker', cost: 5120,
-                   base_cost: 64, pack_units: 80, type: 'strip', price_per_ticket: 1, packing_units: 80 }];
-  const [d] = buildDrafts({ C80: 1 }, cases, vendorsFee);
-  const l = d.lines[0];
-  assert.equal(l.packing_each, 320, 'on the line, where a vendor can check it');
-  assert.equal(l.base_cost, 64);
-  assert.equal(l.pack_units, 80);
-  assert.equal(d.subtotal, 5440);
-});
-
-test('an ordinary strip carries no packing even from the charging vendor', () => {
-  const plain = [{ id: 'S16', vendor_id: 'bv', name: 'Monopoly', cost: 64.6,
-                   type: 'strip', price_per_ticket: 1, packing_units: 0 }];
-  const [d] = buildDrafts({ S16: 3 }, plain, vendorsFee);
-  assert.ok(!d.lines.some((l) => l.kind === 'fee'), 'packing_units 0 means never charged');
-  assert.equal(d.subtotal, round2(64.6 * 3));
-});
-
-test('a mixed order puts packing only on the lines that carry it', () => {
-  const mix = [
-    { id: 'F', vendor_id: 'bv', name: 'Pecker Heads', cost: 58.8, type: 'flash', price_per_ticket: 1, packing_units: 1 },
-    { id: 'S', vendor_id: 'bv', name: 'Monopoly', cost: 64.6, type: 'strip', price_per_ticket: 1, packing_units: 0 },
-    { id: 'C', vendor_id: 'bv', name: '10-Pack of strips', cost: 5120, type: 'strip', price_per_ticket: 1, packing_units: 80 },
+test('receive: with a PO, the scan claims that PO\'s placeholder for the game', () => {
+  const boxes = [
+    { id: 'p1', product_id: 'G1', po_id: 'po1', state: 'on_order', serial: '' },
+    { id: 'p2', product_id: 'G1', po_id: 'po2', state: 'on_order', serial: '' },
   ];
-  const [d] = buildDrafts({ F: 2, S: 4, C: 1 }, mix, vendorsFee);
-  const by = Object.fromEntries(d.lines.map((l) => [l.product_id, l.packing_each]));
-  assert.deepEqual(by, { F: 4, S: 0, C: 320 });
-  assert.equal(d.subtotal, round2(2 * 62.8 + 4 * 64.6 + 5440));
+  assert.equal(resolveReceiveScan('CR3 5', { products: [G()], boxes, poId: 'po2' }).placeholder.id, 'p2');
+  assert.equal(resolveReceiveScan('CR3 5', { products: [G()], boxes, poId: null }).placeholder, null);
 });
 
-test('packing never applies to a vendor that does not charge it', () => {
-  const other = [{ id: 'X', vendor_id: 'md', name: 'Anything', cost: 100, type: 'flash', price_per_ticket: 1, packing_units: 1 }];
-  const drafts = buildDrafts({ X: 5 }, other, vendorsFee);
-  assert.ok(!drafts[0].lines.some((l) => l.kind === 'fee'), 'only Bingo Vision charges packing');
+test('open: a sealed box opens', () => {
+  const boxes = [{ id: 'b', product_id: 'G1', serial: '100', state: 'in_inventory' }];
+  const r = resolveOpenScan('CR3 100', { products: [G()], boxes });
+  assert.equal(r.ok, true);
+  assert.equal(r.box.id, 'b');
+});
+test('open: an open box is not opened twice', () => {
+  const boxes = [{ id: 'b', product_id: 'G1', serial: '100', state: 'opened', opened_at: new Date().toISOString() }];
+  assert.equal(resolveOpenScan('CR3 100', { products: [G()], boxes }).reason, 'already_open');
+});
+test('open: a closed box cannot be reopened by scanning', () => {
+  for (const state of ['sold_out', 'closed_unsold']) {
+    const boxes = [{ id: 'b', product_id: 'G1', serial: '100', state }];
+    assert.equal(resolveOpenScan('CR3 100', { products: [G()], boxes }).reason, 'closed');
+  }
+});
+test('open: a box never received is offered receive-and-open', () => {
+  const r = resolveOpenScan('CR3 999', { products: [G()], boxes: [] });
+  assert.equal(r.reason, 'not_received');
+  assert.equal(r.serial, '999');
 });
 
-test('packing is in the subtotal and the total, but not in the tax', () => {
-  const [d] = buildDrafts({ P1: 2 }, products, vendorsFee);          // 2 x 117.30 = 234.60 + 8 packing
-  assert.equal(d.goods, 234.60);
-  assert.equal(d.packing, 8);
-  assert.equal(d.subtotal, 242.60);
-  assert.equal(d.tax, round2(234.60 * 0.0975), 'the goods are taxed, the service is not');
-  assert.notEqual(d.tax, round2(242.60 * 0.0975));
-  assert.equal(d.total, round2(242.60 + round2(234.60 * 0.0975)));
-});
-
-test('packingLine returns null for a vendor with no fee configured', () => {
-  assert.equal(packingLine({ packing_fee: 0 }, [{ qty: 2, _packUnits: 1 }]), null);
-  assert.equal(packingLine({}, [{ qty: 2, _packUnits: 1 }]), null);
-  assert.equal(packingLine({ packing_fee: 4 }, [{ qty: 2, _packUnits: 0 }]), null,
-    'a charging vendor still adds nothing when nothing packs');
-});
-
-test('lineName includes tickets/price only when known', () => {
-  assert.equal(lineName(products[0]), 'Big Fish (1995/$1)');
-  assert.equal(lineName(products[1]), 'Casino City (1960/$2)');
-  assert.equal(lineName(products[3]), 'Fat Kitty');
-});
-
-// ---------- box state machine ----------
-test('legal lifecycle passes, illegal jumps throw', () => {
+// ---------------------------------------------------------------- box states
+test('the floor lifecycle passes; illegal jumps throw', () => {
   let b = { state: 'on_order' };
-  b = transition(b, 'in_inventory');
-  assert.ok(b.received_at);
-  b = transition(b, 'opened');
-  b = transition(b, 'sold_out');
-  assert.ok(b.sold_out_at);
-  assert.throws(() => transition({ state: 'sold_out' }, 'in_inventory'));
-  assert.throws(() => transition({ state: 'on_order' }, 'sold_out'));
+  b = transition(b, 'in_inventory'); assert.ok(b.received_at);
+  b = transition(b, 'opened'); assert.ok(b.opened_at);
+  const sold = transition(b, 'sold_out'); assert.ok(sold.sold_out_at);
+  const unsold = transition(b, 'closed_unsold'); assert.ok(unsold.closed_at);
+  assert.throws(() => transition({ state: 'in_inventory' }, 'sold_out'));
+  assert.throws(() => transition({ state: 'sold_out' }, 'closed_unsold'));
   assert.throws(() => transition({ state: 'on_order' }, 'opened'));
 });
-
-test('undo paths are allowed', () => {
-  assert.ok(canTransition('opened', 'in_inventory'));   // undo open
-  assert.ok(canTransition('sold_out', 'opened'));       // undo sold-out
-  assert.ok(canTransition('missing', 'in_inventory'));  // late arrival
+test('undo paths go one step back and clear the stamp they undo', () => {
+  assert.ok(canTransition('opened', 'in_inventory'));
+  assert.ok(canTransition('sold_out', 'opened'));
+  assert.ok(canTransition('closed_unsold', 'opened'));
+  assert.ok(canTransition('in_inventory', 'on_order'));
+  const back = transition({ state: 'sold_out', sold_out_at: 'x', opened_at: 'y' }, 'opened');
+  assert.equal(back.sold_out_at, null);
+  assert.equal(back.opened_at, 'y');
 });
-
-test('countByProduct tallies states', () => {
+test('closedAt reads the right stamp for each kind of close', () => {
+  assert.equal(closedAt({ state: 'sold_out', sold_out_at: 'a' }), 'a');
+  assert.equal(closedAt({ state: 'closed_unsold', closed_at: 'b' }), 'b');
+  assert.equal(closedAt({ state: 'opened' }), null);
+});
+test('countByProduct tallies every state', () => {
   const c = countByProduct([
-    { product_id: 'P1', state: 'in_inventory' },
-    { product_id: 'P1', state: 'in_inventory' },
-    { product_id: 'P1', state: 'opened' },
-    { product_id: 'P1', state: 'on_order' },
-    { product_id: 'P2', state: 'sold_out' },
-  ]);
-  assert.deepEqual(c.P1, { inv: 2, open: 1, onorder: 1, sold: 0, missing: 0,
-    off: 0, owned: 3, offBy: {} });
-  assert.equal(c.P2.sold, 1);
+    { product_id: 'G1', state: 'in_inventory' }, { product_id: 'G1', state: 'opened' },
+    { product_id: 'G1', state: 'sold_out' }, { product_id: 'G1', state: 'closed_unsold' },
+    { product_id: 'G1', state: 'on_order' },
+  ]).G1;
+  assert.deepEqual([c.inv, c.open, c.sold, c.closed, c.onorder, c.owned], [1, 1, 1, 1, 1, 2]);
 });
 
-// ---------- where stock is, as opposed to what state it is in ----------
-//
-// Two numbers, not one: what accounting owns and what operations can play. They
-// only ever differ off-site, which is why one number worked until it didn't.
-
-test('off-site stock is owned but never counted as floor stock', () => {
-  const c = countByProduct([
-    { product_id: 'P1', state: 'in_inventory' },
-    { product_id: 'P1', state: 'in_inventory', location: 'vendor' },
-    { product_id: 'P1', state: 'in_inventory', location: 'storage' },
-    { product_id: 'P1', state: 'opened' },
-  ]).P1;
-  assert.equal(c.inv, 1, 'floor stock only');
-  assert.equal(c.open, 1);
-  assert.equal(c.off, 2, 'both off-site boxes');
-  assert.equal(c.owned, 4, 'accounting sees all four');
-  assert.deepEqual(c.offBy, { vendor: 1, storage: 1 });
+// ---------------------------------------------------------------- tickets
+test('a remainder must be a whole number no bigger than the box', () => {
+  const box = { product_id: 'G1' };
+  assert.equal(checkCount('125', box, [G()]), 125);
+  assert.equal(checkCount(0, box, [G()]), 0);
+  assert.throws(() => checkCount(946, box, [G()]), /945/);
+  assert.throws(() => checkCount(-1, box, [G()]));
+  assert.throws(() => checkCount(1.5, box, [G()]));
+});
+test('tickets in a box come from the snapshot taken when it was received', () => {
+  const snap = gameSnapshot(G());
+  const edited = G({ tickets: 2000, ideal_gross_receipts: 2000 });
+  assert.equal(ticketsIn({ game_snapshot: snap }, edited), 945);
+  assert.equal(ticketsIn({}, edited), 2000);
+  assert.equal(gameOf({ game_snapshot: snap }, edited).ideal_gross_receipts, 945);
+});
+test('a past date is pinned to local noon; today is now', () => {
+  const past = new Date(atLocalNoonIso('2026-10-01'));
+  assert.equal(past.getHours(), 12);
+  assert.equal(localYmd(past), '2026-10-01');
+  const t = new Date(atLocalNoonIso(localYmd()));
+  assert.ok(Math.abs(t - Date.now()) < 5000);
 });
 
-test('a box with no location is on the floor', () => {
-  // every row predates the column; none of them may silently become off-site
-  const c = countByProduct([{ product_id: 'P1', state: 'in_inventory' }]).P1;
-  assert.equal(c.inv, 1);
-  assert.equal(c.off, 0);
+// ---------------------------------------------------------------- catalog gaps
+test('a blank cost asks for an update but does not block ordering', () => {
+  assert.ok(needsCost(G()));
+  assert.ok(needsAnyUpdate(G()));
+  assert.ok(!needsVendor(G()));
+  assert.ok(!needsCost(G2));
+});
+test('a game with no form number or ticket count is flagged', () => {
+  assert.ok(needsForm(G({ form_number: '' })));
+  assert.ok(needsTickets(G({ tickets: null })));
 });
 
-test('a shortage covered by off-site stock is a shipment, not a purchase', () => {
-  assert.deepEqual(coverShortage(4, 6), { ship: 4, buy: 0, short: 4, action: 'ship' });
-  assert.deepEqual(coverShortage(4, 0), { ship: 0, buy: 4, short: 4, action: 'buy' });
-  assert.deepEqual(coverShortage(4, 1), { ship: 1, buy: 3, short: 4, action: 'both' });
-  assert.equal(coverShortage(0, 5).action, 'none');
-  assert.match(shortageAdvice(4, 6, 'storage'), /Ship, don't buy/);
-  assert.match(shortageAdvice(4, 0), /Buy 4/);
+// ---------------------------------------------------------------- purchase orders
+test('PO numbers carry BC, the date and a distributor code, and increment', () => {
+  const d = new Date(2026, 9, 22);
+  let r = nextPoNum({}, 'bc', 'lib', d);
+  assert.equal(r.num, 'BC-26-10-22-LIB-001');
+  r = nextPoNum(r.seq, 'bc', 'lib', d);
+  assert.equal(r.num, 'BC-26-10-22-LIB-002');
+  assert.equal(nextPoNum(r.seq, 'bc', 'clk', d).num, 'BC-26-10-22-CLK-001');
 });
-
-test('a session cannot play stock that is off-site', async () => {
-  // the dangerous case: the only box we own is at the distributor. Playing it
-  // would drain the off-site count and hide a real shortage on the floor.
-  const store = shortStore();
-  store.db.boxes = [{ id: 'v1', hall_id: 'sc', product_id: 'G1',
-                      state: 'in_inventory', location: 'vendor' }];
-  await assert.rejects(
-    () => store.applySession('s1', [{ product_id: 'G1', qty: 1 }]),
-    (e) => e.code === 'session_short');
-  assert.equal(store.db.boxes[0].location, 'vendor', 'the off-site box was left alone');
-  assert.equal(store.db.boxes[0].state, 'in_inventory');
+test('a PO line names the game, its form number and ticket count', () => {
+  assert.equal(lineName(G()), '4 Corner - $500 (form CR3, 945/$1)');
 });
-
-test('moving stock changes where it is, not what it is', async () => {
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'v1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor', cost: 100 },
-    { id: 'v2', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor', cost: 100 },
-  ];
-  const res = await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'vendor', to: 'hall', qty: 1 });
-  assert.equal(res.moved, 1);
-  const moved = store.db.boxes.find((b) => b.location === 'hall');
-  assert.equal(moved.state, 'in_inventory', 'still in stock — nothing was received again');
-  assert.ok(moved.counted_at, 'arriving on the floor is a fresh sighting');
-  assert.equal(store.db.boxes.filter((b) => b.location === 'vendor').length, 1);
+test('drafts group by distributor; a blank cost goes out as "?"', () => {
+  const drafts = buildDrafts({ G1: 2, G2: 1 }, [G(), G2], vendors);
+  assert.equal(drafts.length, 2);
+  const lib = drafts.find((d) => d.vendor_id === 'lib');
+  assert.equal(lib.lines[0].price_tbd, true);
+  assert.equal(lib.partial, true);
+  const clk = drafts.find((d) => d.vendor_id === 'clk');
+  assert.equal(clk.total, 470);
+  assert.equal(clk.lines[0].split_boxes, 1);
+  assert.equal(clk.lines[0].packing_each, 0);
 });
-
-test('you cannot ship more than is actually there', async () => {
-  const store = shortStore();
-  store.db.boxes = [{ id: 'v1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'storage' }];
-  await assert.rejects(
-    () => store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'storage', to: 'hall', qty: 3 }),
-    /Only 1 box/);
-});
-
-// ---------- scan resolver ----------
-const boxes = [
-  { id: 'b1', serial: 'SN100', state: 'on_order', po_id: 'po1', product_id: 'P1' },
-  { id: 'b2', serial: 'SN200', state: 'in_inventory', product_id: 'P1' },
-  { id: 'b3', serial: 'SN300', state: 'opened', opened_at: '2026-07-30T21:14:00Z', product_id: 'P1' },
-  { id: 'b4', serial: 'SN400', state: 'sold_out', product_id: 'P2' },
-];
-
-test('resolver: mode off', () => {
-  assert.equal(resolveScan('SN200', { mode: 'off', boxes }).ok, false);
-});
-test('resolver: unknown code', () => {
-  const r = resolveScan('NOPE', { mode: 'open', boxes });
-  assert.equal(r.reason, 'unknown');
-});
-test('resolver: receive matches on-order box on the right PO', () => {
-  assert.equal(resolveScan('SN100', { mode: 'receive', boxes, poId: 'po1' }).action, 'receive');
-  assert.equal(resolveScan('SN100', { mode: 'receive', boxes, poId: 'po2' }).reason, 'wrong_po');
-});
-test('resolver: open works once, duplicate detected', () => {
-  assert.equal(resolveScan('SN200', { mode: 'open', boxes }).action, 'open');
-  assert.equal(resolveScan('SN300', { mode: 'open', boxes }).reason, 'duplicate');
-});
-test('resolver: soldout requires opened first', () => {
-  assert.equal(resolveScan('SN300', { mode: 'soldout', boxes }).action, 'soldout');
-  assert.equal(resolveScan('SN200', { mode: 'soldout', boxes }).reason, 'wrong_state');
-  assert.equal(resolveScan('SN400', { mode: 'soldout', boxes }).reason, 'duplicate');
-});
-
-// ---------- emails ----------
-test('order run builds one vendor email per PO (accounting not copied on POs)', () => {
-  const pos = [{ num: 'SC-2026-08-BV-001', vendor_id: 'bv', lines: [{ qty: 2, name_snapshot: 'Big Fish (1995/$1)', cost: 117.3 }], subtotal: 234.6, tax: 22.87, total: 257.47 }];
-  const emails = buildOrderEmails(pos, vendors, 'Santa Clara', '123 Main St', 'acct@hall.com', SENDER);
-  assert.equal(emails.length, 1);
-  assert.equal(emails[0].kind, 'po');
-  assert.equal(emails[0].to, 'bv@x.com');
-  assert.ok(!emails.some((e) => e.to === 'acct@hall.com'), 'accounting must not be on PO emails');
-  assert.match(emails[0].body, /Total:.*\$257\.47/s);
-});
-
-// ---------- the human layer ----------
-test('PO email greets the vendor contact and is signed by a named person', () => {
-  const pos = [{ num: 'SC-1', vendor_id: 'bv', lines: [{ qty: 1, name_snapshot: 'A', cost: 10 }], subtotal: 10, tax: 1, total: 11 }];
-  const [e] = buildOrderEmails(pos, vendors, 'Santa Clara', '123 Main St', '', SENDER);
-  assert.ok(e.body.startsWith('Hi Scott,'), 'must open with a greeting');
-  assert.match(e.body, /Thanks,\nSagit/, 'must be signed by the sender');
-  assert.match(e.body, /Vanguard/);
-  assert.ok(!/\bPURCHASE ORDER\b/.test(e.body), 'should not read like a machine dump');
-  assert.match(e.subject, /Santa Clara order/);
-});
-
-test('emails degrade gracefully with no contact name or sender configured', () => {
-  const anon = [{ id: 'bv', name: 'Bingo Vision', email: 'bv@x.com', tax_rate: 0.0975 }];
-  const pos = [{ num: 'SC-1', vendor_id: 'bv', lines: [{ qty: 1, name_snapshot: 'A', cost: 10 }], subtotal: 10, tax: 1, total: 11 }];
-  const [e] = buildOrderEmails(pos, anon, 'Santa Clara', '', '');
-  assert.ok(e.body.startsWith('Hello,'), 'falls back to a neutral greeting');
-  assert.match(e.body, /The inventory team/, 'falls back to a neutral signature');
-  assert.ok(!e.body.includes('undefined') && !e.body.includes('null'));
-});
-
-test('two vendors -> two PO emails, still no accounting copies', () => {
-  const pos = [
-    { num: 'SC-1', vendor_id: 'bv', lines: [{ qty: 1, name_snapshot: 'A', cost: 10 }], subtotal: 10, tax: 1, total: 11 },
-    { num: 'SC-2', vendor_id: 'md', lines: [{ qty: 1, name_snapshot: 'B', cost: 20 }], subtotal: 20, tax: 2, total: 22 },
-  ];
-  const emails = buildOrderEmails(pos, vendors, 'Santa Clara', '', 'acct@hall.com', SENDER);
-  assert.equal(emails.length, 2);
-  assert.deepEqual(emails.map((e) => e.to).sort(), ['bv@x.com', 'md@x.com']);
-});
-
-// ---------- items imported without a price ----------
-test('an item with no cost is not ready to order or receive', () => {
-  // needsCost is about money; needsSetup is about whether an order can be addressed
-  assert.equal(needsCost({ name: 'Cowgirls', cost: 0 }), true);
-  assert.equal(needsCost({ name: 'Cowgirls', cost: '0.00' }), true);
-  assert.equal(needsCost({ name: 'Cowgirls' }), true);
-  assert.equal(needsCost({ name: 'BIG FISH', cost: 117.3 }), false);
-  assert.equal(needsCost({ name: 'BIG FISH', cost: '117.30' }), false, 'costs arrive as strings from the API');
-  assert.equal(needsSetup({ name: 'BIG FISH', cost: 117.3, vendor_id: 'bv' }), false,
-    'a priced game with a real distributor is ready to order');
-  assert.equal(needsSetup({ name: 'Cowgirls', cost: 0, vendor_id: 'bv' }), false,
-    'no price is fine — the PO prints ? and asks the vendor');
-});
-
-test('productsNeedingSetup lists the ones with no distributor, alphabetically', () => {
-  const list = productsNeedingSetup([
-    { name: 'Zeta', vendor_id: UNKNOWN_VENDOR, cost: 64.6 },
-    { name: 'BIG FISH', vendor_id: 'bv', cost: 117.3 },
-    { name: 'Alpha', vendor_id: null, cost: 0 },
-    { name: 'Priced later', vendor_id: 'md', cost: 0 },
-  ]);
-  assert.deepEqual(list.map((p) => p.name), ['Alpha', 'Zeta'],
-    'a known distributor with no price is orderable; an unknown distributor is not');
-});
-
-// ---------- inventory filters ----------
-const FLASH  = { name: 'BIG FISH', type: 'flash' };
-const STRIP  = { name: 'Vanguard Strips', type: 'strip' };
-const PAPER  = { name: 'Red/White/Blue paper', type: 'paper' };
-const DAUBER = { name: '$2 DAUBERS — Blue', type: 'supply' };
-const CHERRY = { name: 'Cherry Ticket-- A Whole Lotta', type: 'flash' };
-
-test('misc = dauber supplies and cherry-ticket cases', () => {
-  assert.equal(isMisc(DAUBER), true);
-  assert.equal(isMisc(CHERRY), true, 'cherry cases are misc even though the type is flash');
-  assert.equal(isMisc(FLASH), false);
-  assert.equal(isMisc(STRIP), false);
-});
-
-test('games-only (the default) hides daubers and cherry', () => {
-  const opts = { misc: 'games' };
-  assert.ok(passesFilters(FLASH, opts) && passesFilters(STRIP, opts) && passesFilters(PAPER, opts));
-  assert.ok(!passesFilters(DAUBER, opts));
-  assert.ok(!passesFilters(CHERRY, opts));
-});
-
-test('include-all shows everything; misc-only shows just cherry and daubers', () => {
-  const all = { misc: 'all' };
-  assert.ok([FLASH, STRIP, PAPER, DAUBER, CHERRY].every((p) => passesFilters(p, all)));
-  const only = { misc: 'misc' };
-  assert.ok(passesFilters(DAUBER, only) && passesFilters(CHERRY, only));
-  assert.ok(!passesFilters(FLASH, only) && !passesFilters(STRIP, only));
-});
-
-test('type filter combines with the misc filter', () => {
-  assert.ok(passesFilters(FLASH, { type: 'flash', misc: 'games' }));
-  assert.ok(!passesFilters(STRIP, { type: 'flash', misc: 'games' }));
-  // cherry is type flash but still hidden in games-only
-  assert.ok(!passesFilters(CHERRY, { type: 'flash', misc: 'games' }));
-  assert.ok(passesFilters(CHERRY, { type: 'flash', misc: 'all' }));
-});
-
-// ---------- per-hall sender ----------
-const SENDERS = {
-  sc: { name: 'Sagit', org: 'Vanguard' },
-  rwc: { name: 'Shelly', org: 'Vanguard' },
-};
-
-test('each hall signs with its own person', () => {
-  assert.equal(senderFor(SENDERS, 'sc').name, 'Sagit');
-  assert.equal(senderFor(SENDERS, 'rwc').name, 'Shelly');
-});
-
-test('Redwood City POs are signed by Shelly, Santa Clara by Sagit', () => {
-  const pos = [{ num: 'RWC-1', vendor_id: 'bv', lines: [{ qty: 1, name_snapshot: 'A', cost: 10 }], subtotal: 10, tax: 1, total: 11 }];
-  const [rwc] = buildOrderEmails(pos, vendors, 'Redwood City', '', '', senderFor(SENDERS, 'rwc'));
-  assert.match(rwc.body, /Thanks,\nShelly/);
-  assert.ok(!rwc.body.includes('Sagit'));
-  const [sc] = buildOrderEmails([{ ...pos[0], num: 'SC-1' }], vendors, 'Santa Clara', '', '', senderFor(SENDERS, 'sc'));
-  assert.match(sc.body, /Thanks,\nSagit/);
-});
-
-test('senderFor accepts the older flat shape for every hall', () => {
-  const flat = { name: 'Sagit', org: 'Vanguard' };
-  assert.equal(senderFor(flat, 'rwc').name, 'Sagit');
-  assert.equal(senderFor(flat, 'sc').name, 'Sagit');
-});
-
-test('senderFor degrades to an empty object when unset', () => {
-  assert.deepEqual(senderFor(undefined, 'sc'), {});
-  assert.deepEqual(senderFor({}, 'sc'), {});
-});
-
-test('delivered email computes pay amount from received only, flags variance', () => {
-  const po = { num: 'SC-1', total: 257.47, lines: [] };
-  const received = [{ qty: 1, name_snapshot: 'Big Fish (1995/$1)', cost: 117.3 }];
-  const missing = [{ qty: 1, name_snapshot: 'Big Fish (1995/$1)', cost: 117.3 }];
-  const e = buildDeliveredEmail(po, vendors[0], 'Santa Clara', 'INV-9', received, missing, SENDER, 'Jamie');
-  assert.equal(e.amount, Math.round(117.3 * 1.0975 * 100) / 100);
-  assert.match(e.subject, /short delivery/i);
-  assert.match(e.subject, /Pay \$128\.74/, 'subject states the amount to pay');
-  assert.match(e.body, /don't pay for these/);
-  assert.ok(e.body.startsWith('Hi Jamie,'));
-  assert.match(e.body, /Thanks,\nSagit/);
-});
-
-test('fully-delivered email says so plainly and has no short-pay warning', () => {
-  const po = { num: 'SC-1', total: 128.73, lines: [] };
-  const e = buildDeliveredEmail(po, vendors[0], 'Santa Clara', 'INV-9',
-    [{ qty: 1, name_snapshot: 'Big Fish', cost: 117.3 }], [], SENDER, 'Jamie');
-  assert.ok(!/short/i.test(e.subject));
-  assert.match(e.body, /Everything we ordered arrived/);
-  assert.ok(!e.body.includes("don't pay for these"));
-});
-
-test('shortage email lists missing value', () => {
-  const e = buildShortageEmail({ num: 'SC-1' }, vendors[0], 'SC', [{ qty: 2, name_snapshot: 'X', cost: 50 }], SENDER);
-  assert.match(e.body, /\$100\.00/);
-  assert.match(e.subject, /Missing items/);
-  assert.ok(e.body.startsWith('Hi Scott,'));
-  assert.match(e.body, /2 items were missing/, 'plural phrasing');
-  assert.match(e.body, /backorder/);
-});
-
-test('shortage email uses singular phrasing for one missing item', () => {
-  const e = buildShortageEmail({ num: 'SC-1' }, vendors[0], 'SC', [{ qty: 1, name_snapshot: 'X', cost: 50 }], SENDER);
-  assert.match(e.body, /one item was missing/);
-  assert.match(e.body, /whether it's coming/);
-});
-
-test('a blank type is flagged for update, but guarantee is a real type', () => {
-  assert.equal(needsType({ name: 'Caribbean Gold', type: null }), true);
-  assert.equal(needsType({ name: 'Caribbean Gold' }), true);
-  assert.equal(needsType({ name: 'Guarantee numbers- Money Tree', type: 'guarantee' }), false,
-    'SC stocks 24 real guarantee games — the type must stay valid');
-  assert.equal(needsType({ name: 'Cowgirls', type: 'flash' }), false);
-});
-
-test('only flash games need a ticket count', () => {
-  assert.equal(needsTickets({ name: 'Cowgirls', type: 'flash', tickets: null }), true);
-  assert.equal(needsTickets({ name: 'Cowgirls', type: 'flash', tickets: 1440 }), false);
-  assert.equal(needsTickets({ name: 'Lucky Strip', type: 'strip', tickets: 0 }), false,
-    'strips sell as a pack, so a ticket count is meaningless');
-  assert.equal(needsTickets({ name: 'Red,White and Blue paper', type: 'paper' }), false);
-  assert.equal(needsTickets({ name: 'Guarantee- Comics', type: 'guarantee' }), false);
-  assert.equal(needsTickets({ name: '$2 DAUBERS — Blue', type: 'supply' }), false);
-  assert.equal(needsTickets({ name: 'Caribbean Gold', type: null }), false,
-    'ask for the type first — the ticket question only makes sense once it is flash');
-  assert.equal(needsTickets({ name: 'Big Five cherry ticket', type: 'flash' }), false,
-    'cherry cases sell by the ticket and are counted, not boxed');
-  assert.equal(needsTickets({ name: "Cheery- Thrilling 3's/Bank Busters", type: 'flash' }), false,
-    'the count sheet misspelled cherry — it is still a cherry case');
-});
-
-test('retyping a flash game as a strip clears its ticket requirement', () => {
-  const before = { name: 'Bingo Shark', vendor_id: 'bv', type: 'flash', cost: 64.6, tickets: null };
-  assert.equal(needsAnyUpdate(before), true);
-  const after = { ...before, type: 'strip' };
-  assert.equal(needsAnyUpdate(after), false, 'one edit clears every update tag on the row');
-});
-
-test('only a missing distributor blocks ordering; other gaps just ask for an update', () => {
-  const noType = { name: 'Caribbean Gold', vendor_id: 'pbf', type: null, cost: 89.1, tickets: 1440 };
-  assert.equal(needsSetup(noType), false, 'a blank type must not stop a PO');
-  assert.equal(needsAnyUpdate(noType), true, 'but it still shows update');
-  const done = { name: 'BIG FISH', vendor_id: 'bv', type: 'flash', cost: 117.3, tickets: 1440 };
-  assert.equal(needsAnyUpdate(done), false);
-});
-
-test('mixed packs are not asked for a ticket count', () => {
-  for (const name of ['Misc Packs', 'Premium Misc packs', 'Misc packs of Race/Down',
-                      'Misc Vanguard Packs of strips', 'Assorted flash', 'Variety pack']) {
-    assert.equal(isGrabBag({ name }), true, name);
-    assert.equal(needsTickets({ name, type: 'flash', tickets: null }), false, name);
-  }
-});
-
-test('a real game whose name merely contains those letters still needs a count', () => {
-  assert.equal(isGrabBag({ name: 'Miscreant Mayhem' }), false, 'word boundary, not substring');
-  assert.equal(needsTickets({ name: 'Miscreant Mayhem', type: 'flash', tickets: null }), true);
-  assert.equal(isGrabBag({ name: 'Monopoly' }), false);
-});
-
-// ---- asking a distributor for prices and counts ----
-import { buildPriceRequests, buildPriceRequestEmail } from '../src/lib/logic/emails.js';
-
-const ASK_VENDORS = [
-  { id: 'bv', name: 'Bingo Vision', email: 'scott@example-bv.com', contact_name: 'Scott' },
-  { id: 'md', name: 'Marathon Distributors', email: 'esteban@example-md.com', contact_name: 'Esteban' },
-];
-const ASK_SENDER = { name: 'Sagit', title: 'Inventory', org: 'Vanguard' };
-
-test('one email per distributor, each listing only their own games', () => {
-  const items = [
-    { name: 'Cowgirls', vendor_id: 'bv', cost: 0, tickets: 0, ask: ['price', 'tickets'] },
-    { name: 'Smokin Tokens', vendor_id: 'md', cost: 0, tickets: 0, ask: ['price'] },
-    { name: 'Animal Idol', vendor_id: 'bv', cost: 0, tickets: 0, ask: ['price'] },
-  ];
-  const out = buildPriceRequests(items, ASK_VENDORS, 'Redwood City', ASK_SENDER);
-  assert.equal(out.length, 2);
-  const bv = out.find((e) => e.vendor_id === 'bv');
-  assert.equal(bv.to, 'scott@example-bv.com');
-  assert.match(bv.body, /Hi Scott,/);
-  assert.match(bv.body, /Cowgirls/);
-  assert.match(bv.body, /Animal Idol/);
-  assert.ok(!bv.body.includes('Smokin Tokens'), "another vendor's game must not leak into this email");
-  assert.match(out.find((e) => e.vendor_id === 'md').body, /Smokin Tokens/);
-});
-
-test('games are listed alphabetically and the ask names the missing field', () => {
-  const e = buildPriceRequestEmail(ASK_VENDORS[0], 'Santa Clara', [
-    { name: 'Alpha', cost: 0, tickets: 0, ask: ['price'] },
-    { name: 'Beta', cost: 64.6, tickets: 0, ask: ['tickets'] },
-  ], ASK_SENDER);
-  assert.ok(e.body.indexOf('Alpha') < e.body.indexOf('Beta'));
-  assert.match(e.body, /Beta.*tickets per box/);
-  assert.match(e.body, /we have \$64\.60/, 'quote back what we hold so they can correct it');
-});
-
-test('the subject narrows when we only need one kind of answer', () => {
-  const priceOnly = buildPriceRequestEmail(ASK_VENDORS[0], 'Santa Clara',
-    [{ name: 'Alpha', cost: 0, tickets: 0, ask: ['price'] }], ASK_SENDER);
-  assert.match(priceOnly.subject, /current pricing on 1 game/);
-  const both = buildPriceRequestEmail(ASK_VENDORS[0], 'Santa Clara', [
-    { name: 'Alpha', cost: 0, tickets: 0, ask: ['price'] },
-    { name: 'Beta', cost: 0, tickets: 0, ask: ['tickets'] },
-  ], ASK_SENDER);
-  assert.match(both.subject, /pricing and ticket counts on 2 games/);
-});
-
-test('the sender signs it and an optional note is carried through', () => {
-  const e = buildPriceRequestEmail(ASK_VENDORS[0], 'Santa Clara',
-    [{ name: 'Alpha', cost: 0, tickets: 0, ask: ['price'] }], ASK_SENDER, 'Planning the fall order.');
-  assert.match(e.body, /Planning the fall order\./);
-  assert.match(e.body, /Thanks,\nSagit\nInventory, Vanguard\nSanta Clara/);
-});
-
-test('a vendor with no address is skipped rather than sent into the void', () => {
-  const out = buildPriceRequests(
-    [{ name: 'Orphan', vendor_id: 'nobody', cost: 0, tickets: 0, ask: ['price'] }],
-    ASK_VENDORS, 'Santa Clara', ASK_SENDER);
-  assert.equal(out.length, 0);
-});
-
-// ---- ordering a game before we know its price ----
-const TBD_VENDORS = [{ id: 'bv', name: 'Bingo Vision', email: 'scott@bv.test', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 0 }];
-const TBD_PRODUCTS = [
-  { id: 'A', vendor_id: 'bv', name: 'Priced Game', type: 'flash', cost: 100, tickets: 1440, price_per_ticket: 1 },
-  { id: 'B', vendor_id: 'bv', name: 'New Game', type: 'flash', cost: 0, tickets: null, price_per_ticket: 1 },
-];
-
-test('an unpriced game can be ordered and is flagged rather than counted as free', () => {
-  const [d] = buildDrafts({ A: 2, B: 3 }, TBD_PRODUCTS, TBD_VENDORS);
-  assert.equal(d.lines.length, 2);
-  const b = d.lines.find((l) => l.product_id === 'B');
-  assert.equal(b.price_tbd, true);
-  assert.equal(b.qty, 3, 'the quantity is real even though the price is not');
-  assert.equal(d.lines.find((l) => l.product_id === 'A').price_tbd, false);
-});
-
-test('the total covers the priced lines only, and says so', () => {
-  const [d] = buildDrafts({ A: 2, B: 3 }, TBD_PRODUCTS, TBD_VENDORS);
-  assert.equal(d.subtotal, 200, 'the unpriced line must not add $0 worth of nothing');
-  assert.equal(d.tax, 19.5);
-  assert.equal(d.total, 219.5);
-  assert.equal(d.tbd, 1);
-  assert.equal(d.partial, true);
-});
-
-test('an order with every price known is not marked partial', () => {
-  const [d] = buildDrafts({ A: 2 }, TBD_PRODUCTS, TBD_VENDORS);
-  assert.equal(d.tbd, 0);
-  assert.equal(d.partial, false);
-});
-
-test('poTotals ignores unpriced lines when computing tax', () => {
-  const t = poTotals([
-    { qty: 1, cost: 100, price_tbd: false },
-    { qty: 9, cost: 0, price_tbd: true },
-  ], 0.1);
-  assert.equal(t.subtotal, 100);
-  assert.equal(t.tax, 10, 'tax on what we know, not on a phantom zero');
-  assert.equal(t.total, 110);
+test('totals count priced lines only and tax at the distributor rate', () => {
+  const t = poTotals([{ qty: 2, cost: 100 }, { qty: 1, cost: 0, price_tbd: true }], 0.1);
+  assert.equal(t.subtotal, 200);
+  assert.equal(t.tax, 20);
   assert.equal(t.tbd, 1);
 });
-
-test('the PO email prints ? and asks the vendor to fill the price in', () => {
-  const [d] = buildDrafts({ A: 2, B: 3 }, TBD_PRODUCTS, TBD_VENDORS);
-  const [e] = buildOrderEmails([{ ...d, num: 'SC-2026-08-BV-001' }], TBD_VENDORS, 'Santa Clara', '', '', { name: 'Sagit' });
-  assert.match(e.body, /New Game\s+\?\s+\?/, 'base and line total both read ? on that line');
-  assert.match(e.body, /\$100\.00/, 'the priced line still shows its price');
-  assert.match(e.body, /Items below marked with a \? we don't have a current price\./);
-  assert.match(e.body, /send over pricing, we will update and resend same PO/);
-  assert.match(e.body, /covers the priced lines only/);
-});
-
-test('a fully priced PO email says nothing about missing prices', () => {
-  const [d] = buildDrafts({ A: 2 }, TBD_PRODUCTS, TBD_VENDORS);
-  const [e] = buildOrderEmails([{ ...d, num: 'SC-2026-08-BV-002' }], TBD_VENDORS, 'Santa Clara', '', '', { name: 'Sagit' });
-  assert.ok(!/\s\?\s*$/m.test(e.body), 'no ? in the money columns on a fully priced order');
-  assert.ok(!e.body.includes("Items below marked with a ?"));
-  assert.ok(!e.body.includes('covers the priced lines only'));
-});
-
-// ---- per-vendor delivery addresses ----
-import { deliveryAddress, setVendorAddress, hasOverride, overriddenVendors } from '../src/lib/logic/halls.js';
-
-const HALLS = {
-  sc: { address: '1 Hall Way, Santa Clara, CA' },
-  rwc: { address: '2 Hall Rd, Redwood City, CA', byVendor: { md: '900 Dock St, San Carlos, CA' } },
-};
-
-test('a vendor without its own address gets the hall address', () => {
-  assert.equal(deliveryAddress(HALLS, 'rwc', 'bv'), '2 Hall Rd, Redwood City, CA');
-  assert.equal(deliveryAddress(HALLS, 'sc', 'md'), '1 Hall Way, Santa Clara, CA',
-    "an override on one hall must not leak into the other");
-});
-
-test('a vendor with its own address gets that one', () => {
-  assert.equal(deliveryAddress(HALLS, 'rwc', 'md'), '900 Dock St, San Carlos, CA');
-  assert.equal(hasOverride(HALLS, 'rwc', 'md'), true);
-  assert.equal(hasOverride(HALLS, 'rwc', 'bv'), false);
-});
-
-test('clearing a vendor address puts it back on the hall address', () => {
-  const cleared = setVendorAddress(HALLS, 'rwc', 'md', '   ');
-  assert.equal(hasOverride(cleared, 'rwc', 'md'), false);
-  assert.equal(deliveryAddress(cleared, 'rwc', 'md'), '2 Hall Rd, Redwood City, CA');
-  assert.deepEqual(HALLS.rwc.byVendor, { md: '900 Dock St, San Carlos, CA' }, 'must not mutate the original');
-});
-
-test('setting a vendor address leaves every other vendor and hall alone', () => {
-  const next = setVendorAddress(HALLS, 'rwc', 'bv', '77 Side Door, Redwood City, CA');
-  assert.equal(deliveryAddress(next, 'rwc', 'bv'), '77 Side Door, Redwood City, CA');
-  assert.equal(deliveryAddress(next, 'rwc', 'md'), '900 Dock St, San Carlos, CA');
-  assert.equal(deliveryAddress(next, 'sc', 'bv'), '1 Hall Way, Santa Clara, CA');
-});
-
-test('missing config is empty rather than a crash', () => {
-  assert.equal(deliveryAddress(undefined, 'rwc', 'md'), '');
-  assert.equal(deliveryAddress({}, 'rwc', 'md'), '');
-  assert.equal(deliveryAddress({ rwc: {} }, 'rwc', 'md'), '');
-  assert.deepEqual(overriddenVendors(undefined, 'rwc', [{ id: 'md' }]), []);
-});
-
-test('the PO prints the address for the vendor it is going to', () => {
-  const V = [
-    { id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 0 },
-    { id: 'md', name: 'Marathon', email: 'b@x.test', contact_name: 'Esteban', tax_rate: 0.0975, packing_fee: 0 },
-  ];
-  const P = [
-    { id: 'A', vendor_id: 'bv', name: 'Alpha', type: 'flash', cost: 10, tickets: 100, price_per_ticket: 1 },
-    { id: 'B', vendor_id: 'md', name: 'Beta', type: 'flash', cost: 20, tickets: 100, price_per_ticket: 1 },
-  ];
-  const drafts = buildDrafts({ A: 1, B: 1 }, P, V).map((d, i) => ({ ...d, num: `N${i}` }));
-  const resolver = (vid) => deliveryAddress(HALLS, 'rwc', vid);
-  const out = buildOrderEmails(drafts, V, 'Redwood City', resolver, '', { name: 'Shelly' });
-  const bv = out.find((e) => e.to === 'a@x.test');
-  const md = out.find((e) => e.to === 'b@x.test');
-  assert.match(bv.body, /Please deliver to:\n2 Hall Rd, Redwood City, CA/);
-  assert.match(md.body, /Please deliver to:\n900 Dock St, San Carlos, CA/);
-});
-
-test('a plain string address still works everywhere', () => {
-  const V = [{ id: 'bv', name: 'BV', email: 'a@x.test', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 0 }];
-  const P = [{ id: 'A', vendor_id: 'bv', name: 'Alpha', type: 'flash', cost: 10, tickets: 100, price_per_ticket: 1 }];
-  const [d] = buildDrafts({ A: 1 }, P, V);
-  const [e] = buildOrderEmails([{ ...d, num: 'N1' }], V, 'Santa Clara', '1 Hall Way', '', { name: 'Sagit' });
-  assert.match(e.body, /Please deliver to:\n1 Hall Way/);
-});
-
-// ---- numbers arrive from Postgres as strings ----
-test('$ per ticket survives the string form the API sends', () => {
-  assert.equal(ticketPrice({ price_per_ticket: '1.00' }), 1, 'this is what broke the catalog filter');
-  assert.equal(ticketPrice({ price_per_ticket: '2.00' }), 2);
-  assert.equal(ticketPrice({ price_per_ticket: 2 }), 2);
-  assert.equal(ticketPrice({}), 1, 'default to $1');
-  assert.equal(ticketPrice(null), 1);
-  assert.equal(ticketPrice({ price_per_ticket: '0' }), 1, 'zero is not a real ticket price');
-});
-
-test('a filter comparing $ per ticket as text now matches', () => {
-  const rows = [{ price_per_ticket: '1.00' }, { price_per_ticket: '2.00' }, { price_per_ticket: '1.00' }];
-  assert.equal(rows.filter((p) => String(ticketPrice(p)) === '1').length, 2);
-  assert.equal(rows.filter((p) => String(ticketPrice(p)) === '2').length, 1);
-  // the old expression, kept as a reminder of the bug it caused
-  assert.equal(rows.filter((p) => String(p.price_per_ticket || 1) === '1').length, 0);
-});
-
-test('money formats properly even when the value is a string', () => {
-  assert.equal(fmtMoney('1234.5'), '$1,234.50');
-  assert.equal(fmtMoney('64.60'), '$64.60');
-  assert.equal(fmtMoney(1234.5), '$1,234.50');
-  assert.equal(fmtMoney(null), '$0.00');
-});
-
-// ---- a game whose distributor nobody has confirmed ----
-test('the unknown-distributor placeholder counts as a gap, not a vendor', () => {
-  assert.equal(needsVendor({ vendor_id: UNKNOWN_VENDOR }), true);
-  assert.equal(needsVendor({ vendor_id: null }), true);
-  assert.equal(needsVendor({}), true);
-  assert.equal(needsVendor({ vendor_id: 'bv' }), false);
-});
-
-test('a fully priced game still needs updating while its distributor is unknown', () => {
-  const p = { name: 'Little Horses', vendor_id: UNKNOWN_VENDOR, type: 'flash', cost: 64.6, tickets: 1440 };
-  assert.equal(needsCost(p), false);
-  assert.equal(needsTickets(p), false);
-  assert.equal(needsAnyUpdate(p), true, 'the distributor gap has to keep it flagged');
-  assert.equal(needsSetup(p), true, 'and it must stay off any order');
-});
-
-test('an unknown-distributor game cannot reach a purchase order', () => {
-  const V = [
-    { id: 'bv', name: 'Bingo Vision', tax_rate: 0.0975, packing_fee: 0 },
-    { id: 'unknown', name: 'Unknown — needs confirming', tax_rate: 0.0975, packing_fee: 0 },
-  ];
-  const P = [
-    { id: 'A', vendor_id: 'bv', name: 'Known Game', type: 'flash', cost: 50, tickets: 100, price_per_ticket: 1 },
-    { id: 'B', vendor_id: 'unknown', name: 'Little Horses', type: 'flash', cost: 60, tickets: 100, price_per_ticket: 1 },
-  ];
-  const drafts = buildDrafts({ A: 2, B: 5 }, P, V);
-  assert.equal(drafts.length, 1, 'no PO is built for a vendor we cannot email');
-  assert.equal(drafts[0].vendor_id, 'bv');
-  assert.ok(!drafts[0].lines.some((l) => l.product_id === 'B'),
-    'and it must not be smuggled onto someone else’s order either');
-});
-
-// ---- base cost x units per box, with packing separate ----
-const BV = { id: 'bv', packing_fee: 4 };
-
-test('a box costs the base price times the units inside it', () => {
-  assert.equal(boxCost({ base_cost: 64.6, pack_units: 16 }), 1033.60, 'Monopoly: $64.60 x 16');
-  assert.equal(boxCost({ base_cost: 64.6, pack_units: 8 }), 516.80, 'an ordinary strip: x8');
-  assert.equal(boxCost({ base_cost: 64, pack_units: 80 }), 5120, 'a Biker case: $64 x 80');
-  assert.equal(boxCost({ base_cost: 58.8, pack_units: 1 }), 58.80, 'a box of flash is one unit');
-});
-
-test('a product not yet split into parts still prices correctly', () => {
-  assert.equal(baseCost({ cost: 117.3 }), 117.3, 'fall back to the box cost');
-  assert.equal(packUnits({}), 1, 'never zero, or the maths collapses');
-  assert.equal(packUnits({ pack_units: 0 }), 1);
-  assert.equal(boxCost({ cost: 117.3 }), 117.3);
-});
-
-test('units in a box and units charged packing are different numbers', () => {
-  const monopoly = { base_cost: 64.6, pack_units: 16, packing_units: 0 };
-  assert.equal(packUnits(monopoly), 16, 'sixteen in the box');
-  assert.equal(packingFor(monopoly, BV), 0, 'and none of them charged packing');
-
-  const biker = { base_cost: 64, pack_units: 80, packing_units: 80 };
-  assert.equal(packingFor(biker, BV), 320);
-
-  const flash = { base_cost: 58.8, pack_units: 1, packing_units: 1 };
-  assert.equal(packingFor(flash, BV), 4);
-});
-
-test('the four parts read back as a set', () => {
-  const p = priceParts({ base_cost: 64, pack_units: 80, packing_units: 80 }, BV);
-  assert.equal(p.base, 64);
-  assert.equal(p.units, 80);
-  assert.equal(p.box, 5120, 'base x deals is what the vendor invoices for the goods');
-  assert.equal(p.packing, 320);
-  assert.equal(p.allIn, 5440, 'goods plus packing is what gets paid');
-  assert.equal(p.split, 1);
-  assert.equal(p.perBox, 5120,
-    'but stock value is goods only — packing is freight, not worth on a shelf');
-  assert.equal(p.multiplied, true);
-  assert.equal(p.splits, false);
-  assert.deepEqual(p.unit, ['tote', 'totes'],
-    'and it says what one counted thing is — 80 deals to a unit is the Biker case, '
-    + 'which is counted in totes');
-});
-
-test('a vendor that charges no packing never adds any, whatever the units', () => {
-  const p = priceParts({ base_cost: 100, pack_units: 8, packing_units: 8 }, { packing_fee: 0 });
-  assert.equal(p.packing, 0);
-  assert.equal(p.allIn, 800);
-});
-
-// ---- one ordered unit, several boxes on the shelf ----
-test('a case that arrives as 16 totes values each tote at a sixteenth', () => {
-  const biker = { base_cost: 64, pack_units: 80, packing_units: 80, split_boxes: 16 };
-  const p = priceParts(biker, BV);
-  assert.equal(p.box, 5120, 'the vendor invoices the case');
-  assert.equal(p.packing, 320);
-  assert.equal(p.allIn, 5440, 'landed cost of the case');
-  assert.equal(p.split, 16);
-  assert.equal(p.perBox, 320,
-    'each tote is worth a sixteenth of the GOODS — the $320 packing bills on the PO '
-    + 'but does not ride on the shelf, or an identical tote from a bigger delivery '
-    + 'would be worth less');
-});
-
-test('almost everything is one box per ordered unit, so nothing changes', () => {
-  const flash = { base_cost: 58.8, pack_units: 1, packing_units: 1 };
-  const p = priceParts(flash, BV);
-  assert.equal(p.split, 1);
-  assert.equal(p.splits, false);
-  assert.equal(p.perBox, p.box, 'buy a box, shelf a box');
-  assert.equal(p.perBox, 58.8, 'at the goods price; its $4 packing stays on the PO');
-  assert.equal(p.allIn, 62.8, 'which is still what the vendor charges');
-});
-
-test('ordering a splitting product creates one box per tote, not per case', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', tax_rate: 0.0975, packing_fee: 4 }];
-  const P = [{ id: 'B', vendor_id: 'bv', name: '10-Pack of strips Biker', type: 'strip',
-               base_cost: 64, pack_units: 80, packing_units: 80, split_boxes: 16,
-               price_per_ticket: 1, cost: 5120 }];
-  const [d] = buildDrafts({ B: 2 }, P, V);
-  const line = d.lines.find((l) => l.kind !== 'fee');
-  assert.equal(line.qty, 2, 'the PO orders 2 cases');
-  assert.equal(line.cost, 5120, 'at the case price');
-  assert.equal(line.split_boxes, 16);
-  assert.equal(line.per_box_cost, 320);
-  assert.equal(line.qty * line.split_boxes, 32, 'which will become 32 totes in inventory');
-  assert.equal(round2(line.qty * line.split_boxes * line.per_box_cost), 10240,
-    'and the shelf value equals the goods on the order, packing excluded');
-});
-
-// ---- packing on the line, and the stock/packing split ----
-test('a PO line prints base, units, packing and its own total', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 4 }];
-  const P = [
-    { id: 'C', vendor_id: 'bv', name: '10-Pack of strips Biker', type: 'strip',
-      base_cost: 64, pack_units: 80, packing_units: 80, cost: 5120, price_per_ticket: 1 },
-    { id: 'F', vendor_id: 'bv', name: 'Pecker Heads', type: 'flash',
-      base_cost: 58.8, pack_units: 1, packing_units: 1, cost: 58.8, price_per_ticket: 1 },
-  ];
-  const [d] = buildDrafts({ C: 1, F: 2 }, P, V);
-  const [e] = buildOrderEmails([{ ...d, num: 'N1' }], V, 'Redwood City', '', '', { name: 'Shelly' });
-
-  assert.match(e.body, /Unit\s+Item\s+Base\s+Deals\s+Packing\s+Line total/,
-    'a header in the words both sides of an invoice use: a Unit is ordered, Deals are inside it');
-  assert.match(e.body, /10-Pack of strips Biker\s+\$64\.00\s+x80\s+\$320\.00\s+\$5,440\.00/);
-  assert.match(e.body, /Pecker Heads\s+\$58\.80\s+\$8\.00\s+\$125\.60/,
-    'two boxes: packing is extended too, so 58.80x2 + 8.00 = 125.60 reads off the row');
-  assert.ok(!/Packing — /.test(e.body), 'no lump-sum packing line any more');
-});
-
-test('the PO splits its subtotal into stock and packing', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'Scott', tax_rate: 0.0975, packing_fee: 4 }];
-  const P = [{ id: 'F', vendor_id: 'bv', name: 'Pecker Heads', type: 'flash',
-               base_cost: 58.8, pack_units: 1, packing_units: 1, cost: 58.8, price_per_ticket: 1 }];
-  const [d] = buildDrafts({ F: 10 }, P, V);
-  const [e] = buildOrderEmails([{ ...d, num: 'N2' }], V, 'Redwood City', '', '', { name: 'Shelly' });
-  assert.match(e.body, /Stock:\s+\$588\.00/);
-  assert.match(e.body, /Packing:\s+\$40\.00/);
-  assert.match(e.body, /Subtotal:\s+\$628\.00/);
-  assert.equal(d.subtotal, 628, 'and the totals agree with the maths');
-});
-
-test('an order with no packing shows no stock/packing split', () => {
-  const V = [{ id: 'md', name: 'Marathon', email: 'b@x.test', tax_rate: 0.0975, packing_fee: 0 }];
-  const P = [{ id: 'X', vendor_id: 'md', name: 'Lucky Kat', type: 'flash',
-               base_cost: 103, pack_units: 1, packing_units: 1, cost: 103, price_per_ticket: 1 }];
-  const [d] = buildDrafts({ X: 4 }, P, V);
-  const [e] = buildOrderEmails([{ ...d, num: 'N3' }], V, 'Santa Clara', '', '', { name: 'Sagit' });
-  assert.ok(!/Stock:/.test(e.body), 'nothing to split when the vendor charges no packing');
-  assert.match(e.body, /Subtotal:\s+\$412\.00/);
-});
-
-// ---- Postgres numerics arrive as strings ----
-//
-// These guard a bug that shipped: buildDrafts tested the cost with Number() but
-// stored the raw string, so poTotals computed "58.80" + 4 = "58.804" and packing
-// silently fell out of every subtotal, tax and total. The line total was right and
-// the subtotal beneath it was wrong, in the same email, to the vendor.
-test('a PO built from string-typed numerics still totals correctly', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'S',
-               tax_rate: '0.0975', packing_fee: '4.00' }];
-  const P = [{ id: 'F', vendor_id: 'bv', name: 'Pecker Heads', type: 'flash',
-               base_cost: '58.80', pack_units: 1, packing_units: 1, split_boxes: 1,
-               cost: '58.80', price_per_ticket: '1.00' }];
-  const [d] = buildDrafts({ F: 10 }, P, V);
-
-  assert.equal(typeof d.lines[0].cost, 'number', 'the draft coerces on the way in');
-  assert.equal(d.subtotal, 628, '10 x (58.80 goods + 4.00 packing)');
-  assert.equal(d.tax, 57.33, '9.75% of the $588 of goods — the $40 of packing is untaxed');
-  assert.equal(d.total, 685.33);
-});
-
-// ---- tax falls on the goods, not on the service ----
-//
-// Reproduced from the distributors' own invoices, which is the only authority
-// that settles it. Both of these are Bingo Vision, August 2026.
-test('Bingo Vision 1806006 reproduces line for line', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'S',
-               tax_rate: '0.0975', packing_fee: '4.00' }];
-  // ten strip titles, 80 deals each at $64.60, collated at $2.00 a deal
-  const P = Array.from({ length: 10 }, (_, i) => ({
-    id: `T${i}`, vendor_id: 'bv', name: `Tote title ${i}`, type: 'strip',
-    base_cost: '64.60', pack_units: 80, packing_units: 80, packing_rate: '2.00',
-    split_boxes: 16, cost: '5168.00', price_per_ticket: '1.00',
-  }));
-  const [d] = buildDrafts(Object.fromEntries(P.map((p) => [p.id, 1])), P, V);
-
-  assert.equal(d.goods, 51680, 'ten lines at $5,168');
-  assert.equal(d.packing, 1600, 'STRIP COLLATION SERVICE, 800 deals at $2.00');
-  assert.equal(d.subtotal, 53280);
-  assert.equal(d.tax, 5038.80, 'as printed — 9.75% of the goods, not of the subtotal');
-  assert.equal(d.total, 58318.80);
-});
-
-test('a strip tote is collated at $2 a deal, not packed at the flash $4', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'S',
-               tax_rate: '0.0975', packing_fee: '4.00' }];
-  const P = [
-    { id: 'T', vendor_id: 'bv', name: 'Biker tote', type: 'strip', base_cost: '64.60',
-      pack_units: 80, packing_units: 80, packing_rate: '2.00', split_boxes: 16,
-      cost: '5168.00', price_per_ticket: '1.00' },
-    { id: 'F', vendor_id: 'bv', name: 'Some flash', type: 'flash', base_cost: '58.80',
-      pack_units: 1, packing_units: 1, split_boxes: 1, cost: '58.80', price_per_ticket: '1.00' },
-  ];
-  const [d] = buildDrafts({ T: 1, F: 1 }, P, V);
-  const by = Object.fromEntries(d.lines.map((l) => [l.product_id, l.packing_each]));
-  assert.equal(by.T, 160, '80 deals x $2.00');
-  assert.equal(by.F, 4, 'the flash box still takes the vendor rate');
-});
-
-test('Marathon 5812098 and 5812121 reproduce — games taxed, daubers not', () => {
-  const V = [{ id: 'md', name: 'Marathon', email: 'a@x.test', contact_name: 'E',
-               tax_rate: '0.0975', packing_fee: '0' }];
-  const games = [
-    { id: 'G1', vendor_id: 'md', name: 'Rags to Riches $2', type: 'flash', base_cost: '209.00',
-      pack_units: 1, packing_units: 0, split_boxes: 1, cost: '209.00', price_per_ticket: '2.00' },
-    { id: 'G2', vendor_id: 'md', name: 'Cats & Dogs', type: 'flash', base_cost: '280.00',
-      pack_units: 1, packing_units: 0, split_boxes: 1, cost: '280.00', price_per_ticket: '2.00' },
-    { id: 'G3', vendor_id: 'md', name: 'Lucky Bucks', type: 'flash', base_cost: '280.00',
-      pack_units: 1, packing_units: 0, split_boxes: 1, cost: '280.00', price_per_ticket: '2.00' },
-  ];
-  // 2 x 209 + 209 + 209 + 280 + 280 = 1396.00, tax 136.11 as printed
-  const [g] = buildDrafts({ G1: 4, G2: 1, G3: 1 }, games, V);
-  assert.equal(g.goods, 1396, 'the printed net');
-  assert.equal(g.tax, 136.11, 'the printed tax');
-  assert.equal(g.total, 1532.11, 'the printed balance due');
-
-  const daubers = [{ id: 'D', vendor_id: 'md', name: 'Sunsational 4oz', type: 'supply',
-    base_cost: '19.50', pack_units: 1, packing_units: 0, split_boxes: 1,
-    cost: '19.50', price_per_ticket: '1.00', taxable: false }];
-  const [d] = buildDrafts({ D: 10 }, daubers, V);
-  assert.equal(d.goods, 195);
-  assert.equal(d.tax, 0, 'no tax line on 5812121');
-  assert.equal(d.total, 195);
-});
-
-test('an exempt line does not drag the taxable ones out of tax', () => {
-  const V = [{ id: 'md', name: 'Marathon', email: 'a@x.test', contact_name: 'E',
-               tax_rate: '0.10', packing_fee: '0' }];
-  const P = [
-    { id: 'G', vendor_id: 'md', name: 'A game', type: 'flash', base_cost: '100',
-      pack_units: 1, packing_units: 0, split_boxes: 1, cost: '100', price_per_ticket: '1' },
-    { id: 'D', vendor_id: 'md', name: 'A dauber', type: 'supply', base_cost: '50',
-      pack_units: 1, packing_units: 0, split_boxes: 1, cost: '50', price_per_ticket: '1',
-      taxable: false },
-  ];
-  const [d] = buildDrafts({ G: 1, D: 1 }, P, V);
-  assert.equal(d.goods, 150);
-  assert.equal(d.taxable, 100);
-  assert.equal(d.exempt, 50);
-  assert.equal(d.tax, 10, 'ten percent of the game only');
-  assert.equal(d.total, 160);
-});
-
-test('a packing rate of 0 is an answer, not a missing value', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'S',
-               tax_rate: '0.0975', packing_fee: '4.00' }];
-  const free = { base_cost: 58.8, pack_units: 1, packing_units: 1, packing_rate: 0 };
-  assert.equal(packingFor(free, V[0]), 0, 'pinned to free, not fallen through to $4');
-  const unset = { base_cost: 58.8, pack_units: 1, packing_units: 1, packing_rate: null };
-  assert.equal(packingFor(unset, V[0]), 4, 'null means use the distributor rate');
-});
-
-test('the printed subtotal equals the printed lines', () => {
-  const V = [{ id: 'bv', name: 'Bingo Vision', email: 'a@x.test', contact_name: 'S',
-               tax_rate: '0.0975', packing_fee: '4.00' }];
-  const P = [
-    { id: 'C', vendor_id: 'bv', name: 'Biker case', type: 'strip', base_cost: '64.60',
-      pack_units: 80, packing_units: 80, split_boxes: 16, cost: '5168.00', price_per_ticket: '1.00' },
-    { id: 'F', vendor_id: 'bv', name: 'Pecker Heads', type: 'flash', base_cost: '58.80',
-      pack_units: 1, packing_units: 1, split_boxes: 1, cost: '58.80', price_per_ticket: '1.00' },
-  ];
-  const [d] = buildDrafts({ C: 1, F: 2 }, P, V);
-  // what the rows say, added up by hand, must be what the footer says
-  const printed = d.lines.reduce((a, l) => a + l.qty * (Number(l.cost) + Number(l.packing_each || 0)), 0);
-  assert.equal(round2(printed), d.subtotal, 'no line may disagree with the subtotal beneath it');
-  assert.equal(d.subtotal, 5613.6);
-});
-
-// ---------- the amount accounting is told to pay ----------
-//
-// These three pin the money in buildDeliveredEmail, because its result is written
-// straight into payments.amount. Every one of them failed before the fix: the old
-// code taxed the packing service, ignored products.taxable, and was handed a
-// packing figure that had not been brought down to the box.
-
-test('delivered email does not tax packing — it is a service, not goods', () => {
-  // BV case: $51,680 of stock + $1,600 collation. The vendor's own invoice taxes
-  // 51,680 -> 5,038.80, not 53,280 -> 5,194.80.
-  const po = { num: 'SC-1', total: 58318.80 };
-  const received = [{ qty: 10, name_snapshot: 'Biker', cost: 5168, packing_each: 160, taxable: true }];
-  const e = buildDeliveredEmail(po, vendors[0], 'Santa Clara', 'INV-1', received, [], SENDER, 'Jamie');
-  assert.equal(e.amount, 58318.80, 'tax base must exclude packing');
-  assert.match(e.body, /Stock:\s+\$51,680\.00/);
-  assert.match(e.body, /Packing:\s+\$1,600\.00/);
-  assert.match(e.body, /Difference:\s+\$0\.00/, 'the bill must agree with the PO it came from');
-});
-
-test('delivered email honours products.taxable — daubers are exempt', () => {
-  // Marathon 5812121: all daubers, $987.00 net, no tax line on the invoice at all.
-  const po = { num: 'SC-2', total: 987 };
-  const received = [{ qty: 10, name_snapshot: 'Daubers', cost: 98.70, packing_each: 0, taxable: false }];
-  const e = buildDeliveredEmail(po, vendors[1], 'Santa Clara', 'INV-2', received, [], SENDER, 'Jamie');
-  assert.equal(e.amount, 987, 'an exempt line must not be taxed');
-  assert.match(e.body, /Of which exempt:\s+\$987\.00/);
-});
-
-test('delivered email taxes a mixed load correctly', () => {
-  const po = { num: 'SC-3', total: 0 };
-  const received = [
-    { qty: 1, name_snapshot: 'Game', cost: 1000, packing_each: 100, taxable: true },
-    { qty: 1, name_snapshot: 'Daubers', cost: 500, packing_each: 0, taxable: false },
-  ];
-  const e = buildDeliveredEmail(po, vendors[0], 'Santa Clara', 'INV-3', received, [], SENDER, '');
-  // goods 1500, packing 100, subtotal 1600; taxable goods 1000 -> tax 97.50
-  assert.equal(e.amount, 1697.50);
-});
-
-test('receivedLine brings EVERY per-unit figure down to the box', () => {
-  // A case of 16 totes at $5,168 carrying $160 of collation is $323 + $10 a tote —
-  // not $323 + $160. This calls the real function Receiving calls.
-  const l = { product_id: 'P163', name_snapshot: 'Biker', qty: 1, cost: 5168, packing_each: 160, split_boxes: 16, taxable: true };
-  const r = receivedLine(l, null, 16, 5168);
-  assert.equal(r.cost, 323, 'cost per tote');
-  assert.equal(r.packing_each, 10, 'packing per tote — NOT the case figure');
-  assert.equal(r.qty, 16);
-  assert.equal(r.price_tbd, false);
-  // and the whole case bills exactly what one unsplit case bills
-  const e = buildDeliveredEmail({ num: 'SC-4', total: 5831.88 }, vendors[0], 'Santa Clara', 'INV-4', [r], [], SENDER, '');
-  assert.equal(e.amount, 5831.88);
-  assert.match(e.body, /Difference:\s+\$0\.00/);
-});
-
-test('receivedLine falls back to the catalog split when the line has none', () => {
-  const l = { product_id: 'P163', name_snapshot: 'Biker', qty: 1, cost: 5168, packing_each: 160 };
-  const r = receivedLine(l, { split_boxes: 16 }, 16, 5168);
-  assert.equal(r.cost, 323);
-  assert.equal(r.packing_each, 10);
-});
-
-test('extraLine divides an off-PO price down and reads exemption off the product', () => {
-  // product.cost is an ORDERED-UNIT price; qty is a box count. Billing one
-  // against the other put a single off-PO Biker case on the invoice at $82,688.
-  const biker = { id: 'P163', name: 'Biker', cost: 5168, base_cost: 64.6, pack_units: 80, split_boxes: 16, taxable: true };
-  const x = extraLine(biker, 'Biker', 16, 5168);
-  assert.equal(x.cost, 323, 'must be the per-tote price, not the case price');
-  assert.equal(x.qty, 16);
-  assert.equal(x.taxable, true);
-  assert.equal(x.extra, true);
-  const e = buildDeliveredEmail({ num: 'X', total: 0 }, vendors[0], 'SC', 'I', [x], [], SENDER, '');
-  assert.equal(e.amount, 5671.88);
-
-  const daub = { id: 'S830', name: 'Dabbin Fever', cost: 12, base_cost: 12, pack_units: 1, split_boxes: 1, taxable: false };
-  const d = extraLine(daub, 'Dabbin Fever', 10, 12);
-  assert.equal(d.cost, 12);
-  assert.equal(d.taxable, false, 'an exempt supply stays exempt when it arrives off-PO');
-  assert.equal(buildDeliveredEmail({ num: 'X', total: 0 }, vendors[1], 'SC', 'I', [d], [], SENDER, '').amount, 120);
-});
-
-test('missingLine is priced like what arrived, and only stays TBD with no price at all', () => {
-  const l = { product_id: 'P163', name_snapshot: 'Biker', qty: 1, cost: 5168, packing_each: 160, split_boxes: 16, price_tbd: true };
-  assert.equal(missingLine(l, null, 4, 5168).price_tbd, false, 'a price was supplied');
-  assert.equal(missingLine(l, null, 4, 5168).cost, 323);
-  assert.equal(missingLine(l, null, 4, 0).price_tbd, true, 'still nothing to quote');
-});
-
-test('perUnitOf never divides by zero and copes with junk', () => {
-  assert.equal(perUnitOf(160, 16), 10);
-  assert.equal(perUnitOf(160, 0), 160);
-  assert.equal(perUnitOf(160, null), 160);
-  assert.equal(perUnitOf(undefined, 16), 0);
-  assert.equal(perUnitOf('160', '16'), 10);
-});
-
-test('a split line received in two deliveries bills the case exactly once', () => {
-  const l = { product_id: 'P163', name_snapshot: 'Biker', qty: 1, cost: 5168, packing_each: 160, split_boxes: 16, taxable: true };
-  const first = buildDeliveredEmail({ num: 'A', total: 0 }, vendors[0], 'SC', 'I', [receivedLine(l, null, 8, 5168)], [], SENDER, '');
-  const second = buildDeliveredEmail({ num: 'A', total: 0 }, vendors[0], 'SC', 'I', [receivedLine(l, null, 8, 5168)], [], SENDER, '');
-  assert.equal(round2(first.amount + second.amount), 5831.88);
-});
-
-test('shortage value counts goods plus packing, and no tax', () => {
-  const missing = [{ qty: 2, name_snapshot: 'Biker', cost: 323, packing_each: 10 }];
-  const e = buildShortageEmail({ num: 'SC-5' }, vendors[0], 'Santa Clara', missing, SENDER);
-  assert.match(e.body, /Missing value:\s+\$666\.00/);
-});
-
-// ---------- variety packs on the order ----------
-
-test('a variety pack carries its colours into the PO line at send time', () => {
-  // Not looked up when something renders it — baked into name_snapshot, the same
-  // way the name is, so the sent order is a record of what was actually asked for.
-  const pack = { id: 'S831', vendor_id: 'md', name: 'Sunsational 4oz — colour pack ($3)',
-    type: 'supply', base_cost: 19.50, cost: 214.50, pack_units: 11, split_boxes: 11,
-    packing_units: 0, taxable: false };
-  const md = { id: 'md', name: 'Marathon', email: 'm@x', tax_rate: 0.0975, packing_fee: 4 };
-  const [d] = buildDrafts({ S831: 2 }, [pack], [md]);
-  const snap = d.lines[0].name_snapshot;
-  assert.match(snap, /^Sunsational 4oz — colour pack \(\$3\)\n/);
-  assert.match(snap, /colours: Red, Green, Orange, Pink, Magenta, Sky Blue, Coral, Lilac, Violet, Yellow and Ruby Red$/);
-  assert.equal(snapshotHead(snap), 'Sunsational 4oz — colour pack ($3)');
-  assert.equal(snapshotRest(snap).length, 1);
-  // exempt supply, no packing, 2 x $214.50
-  assert.equal(d.total, 429);
-});
-
-test('an ordinary game gets no colour line', () => {
-  const p = { id: 'M1', vendor_id: 'md', name: 'Lucky Sevens', type: 'flash', base_cost: 80,
-    cost: 80, pack_units: 1, split_boxes: 1, packing_units: 1, tickets: 1200, price_per_ticket: 1 };
-  const md = { id: 'md', name: 'Marathon', email: 'm@x', tax_rate: 0.0975, packing_fee: 4 };
-  const [d] = buildDrafts({ M1: 5 }, [p], [md]);
-  assert.equal(d.lines[0].name_snapshot, 'Lucky Sevens (1200/$1)');
-  assert.equal(snapshotRest(d.lines[0].name_snapshot).length, 0);
-});
-
-test('the colour line prints under its row without widening the table', () => {
-  const md = { id: 'md', name: 'Marathon', email: 'm@x', contact_name: 'Esteban', tax_rate: 0.0975 };
-  const lines = [{ product_id: 'S831', qty: 2, cost: 214.50, base_cost: 19.50, pack_units: 11,
-    packing_each: 0, taxable: false, kind: 'item',
-    name_snapshot: 'Sunsational 4oz — colour pack ($3)\ncolours: Red, Green and Blue' }];
-  const po = { num: 'X', hall_id: 'sc', vendor_id: 'md', lines, ...poTotals(lines, 0.0975), sent_at: '2026-08-12' };
-  const [e] = buildOrderEmails([po], [md], 'Santa Clara', '1 Main St', SENDER);
-  const rows = e.body.split('\n');
-  const item = rows.find((r) => r.includes('Sunsational'));
-  const colourRow = rows.find((r) => r.trim().startsWith('colours:'));
-  assert.ok(item && colourRow, 'both the row and its colours are printed');
-  assert.ok(rows.indexOf(colourRow) === rows.indexOf(item) + 1, 'colours sit directly under the row');
-  // the Item column is sized on the name, not on the colour list
-  const header = rows.find((r) => r.startsWith('Unit'));
-  assert.ok(header.length < 100, `header should stay narrow, was ${header.length}`);
-});
-
-// ---------------------------------------------------------------- shortfalls
-//
-// The bug these guard: applySession used to invent a box whenever the sheet
-// played more than the shelf held, consume it in the same statement, and carry
-// on. The ledger balanced, so nothing ever looked wrong — 79 boxes at Santa
-// Clara were written off that way before anyone counted.
-
-test('a session that is short refuses, and writes nothing', async () => {
-  const store = shortStore();
-  await assert.rejects(
-    () => store.applySession('s1', [{ product_id: 'G1', qty: 3 }]),
-    (e) => e.code === 'session_short' && /needs 3/.test(e.message));
-  // the crucial part: the shelf is untouched and the session is still open
-  assert.equal(store.db.boxes.filter((b) => b.state === 'in_inventory').length, 2);
-  assert.equal(store.db.boxes.filter((b) => b.unrecorded).length, 0);
-  assert.equal(store.db.sessions[0].applied_at, null);
-});
-
-test('the refusal names every short game and the size of the gap', async () => {
-  const store = shortStore();
-  const e = await store.applySession('s1', [{ product_id: 'G1', qty: 3 }, { product_id: 'G2', qty: 2 }])
-    .then(() => null, (err) => err);
-  assert.ok(e, 'it rejected');
-  assert.equal(e.short.length, 2);
-  assert.deepEqual(e.short.map((s) => s.wanted - s.found).sort(), [2, 2]);
-  assert.match(e.message, /Bingo Bandit/);
-  assert.match(e.message, /Cash Cow/);
-  assert.match(e.message, /none on the shelf/);
-});
-
-test('nothing is consumed when a LATER line is the short one', async () => {
-  // the old loop applied game by game, so a shortfall on the last game left every
-  // earlier game already taken off the shelf and the session still unapplied
-  const store = shortStore();
-  await assert.rejects(() => store.applySession('s1',
-    [{ product_id: 'G3', qty: 1 }, { product_id: 'G1', qty: 3 }]));
-  const g3 = store.db.boxes.find((b) => b.product_id === 'G3');
-  assert.equal(g3.state, 'in_inventory', 'the satisfiable line was not consumed');
-  assert.equal(g3.session_id, undefined);
-});
-
-test('allowShort records the write-off, and says so on the history', async () => {
-  const store = shortStore();
-  const res = await store.applySession('s1', [{ product_id: 'G1', qty: 3 }], { allowShort: true });
-  assert.equal(res.moved, 1);
-  assert.equal(res.invented, 2);
-  const ghosts = store.db.boxes.filter((b) => b.unrecorded);
-  assert.equal(ghosts.length, 2);
-  assert.ok(ghosts.every((b) => b.state === 'sold_out' && b.session_id === 's1'));
-  assert.ok(store.db.events.some((e) => e.kind === 'session.short'),
-    'a write-off gets its own history line, not a subclause of the apply');
-});
-
-test('a session that fits applies with no shortfall event', async () => {
-  const store = shortStore();
-  const res = await store.applySession('s1', [{ product_id: 'G1', qty: 1 }]);
-  assert.equal(res.moved, 1);
-  assert.equal(res.invented, 0);
-  assert.equal(store.db.boxes.filter((b) => b.unrecorded).length, 0);
-  assert.ok(!store.db.events.some((e) => e.kind === 'session.short'));
-});
-
-test('a write-off is valued per box, not per ordered unit', () => {
-  // $512 a case, 8 boxes to the case -> $64 a box. Billing the case against a box
-  // count is the same error that turned a $5,671 receipt into $90,750.
-  assert.equal(writeOffCost({ base_cost: 512, pack_units: 1, split_boxes: 8 }), 64);
-  assert.equal(writeOffCost({ base_cost: 19.5, pack_units: 11, split_boxes: 11 }), 19.5);
-  assert.equal(writeOffCost(undefined), 0);
-});
-
-// The regression that prompted the split: fifteen Monster Score sitting at
-// Marathon made a raw in_inventory count read nineteen when four were playable,
-// and anyone reading nineteen decides not to order.
-
-test('the operational number never includes stock held elsewhere', () => {
-  const boxes = [
-    ...Array.from({ length: 4 }, (_, i) => ({ id: 'f' + i, product_id: 'N904', state: 'in_inventory' })),
-    ...Array.from({ length: 15 }, (_, i) => ({ id: 'v' + i, product_id: 'N904', state: 'in_inventory', location: 'vendor' })),
-    ...Array.from({ length: 4 }, (_, i) => ({ id: 'o' + i, product_id: 'N904', state: 'on_order' })),
-  ];
-  const c = countByProduct(boxes).N904;
-  assert.equal(c.inv, 4, 'available is four, not nineteen');
-  assert.equal(c.off, 15);
-  assert.equal(c.owned, 19, 'accounting still sees all nineteen');
-  assert.equal(c.onorder, 4, 'on order is a commitment, counted apart from both');
-  // and the two must never be the same number
-  assert.notEqual(c.inv, c.owned);
-});
-
-test('onFloor filters a list down to floor stock', () => {
-  const boxes = [
-    { id: 'a', state: 'in_inventory' },
-    { id: 'b', state: 'in_inventory', location: 'hall' },
-    { id: 'c', state: 'in_inventory', location: 'vendor' },
-    { id: 'd', state: 'opened', location: 'storage' },
-  ];
-  assert.deepEqual(onFloor(boxes).map((b) => b.id), ['a', 'b']);
-  assert.deepEqual(playable(boxes).map((b) => b.id), ['a', 'b']);
-});
-
-// ---------- regressions from the adversarial review of the location change ----------
-
-test('an adjustment writes off floor boxes, never off-site ones', async () => {
-  // Reported bug: Adjust.jsx validated against floor stock but the store selected
-  // its pool with no location filter, so writing off four boxes lost on the floor
-  // marked four of the distributor's boxes missing instead. The floor count never
-  // moved, so the operator would repeat it until off-site drained to nothing.
-  const store = shortStore();
-  store.db.boxes = [
-    ...Array.from({ length: 2 }, (_, i) => ({ id: 'f' + i, hall_id: 'sc', product_id: 'G1', state: 'in_inventory' })),
-    ...Array.from({ length: 5 }, (_, i) => ({ id: 'v' + i, hall_id: 'sc', product_id: 'G1',
-      state: 'in_inventory', location: 'vendor' })),
-  ];
-  await store.adjustStock({ hallId: 'sc', product: store.db.products[0], delta: -2, note: 'lost on the floor' });
-  const missing = store.db.boxes.filter((b) => b.state === 'missing');
-  assert.equal(missing.length, 2);
-  assert.ok(missing.every((b) => (b.location || 'hall') === 'hall'),
-    `wrote off ${missing.map((b) => b.id)} — off-site boxes must never be touched`);
-  assert.equal(store.db.boxes.filter((b) => b.location === 'vendor').length, 5);
-});
-
-test('shipping moves the boxes from the row you clicked, not another distributor', async () => {
-  // Reported bug: getOffsite groups by product AND location_ref, but moveBoxes
-  // matched on product+location only, so "ship the Marathon row" could bring in
-  // Trade Products' stock and mark the wrong distributor as delivered.
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'm1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor', location_ref: 'Marathon' },
-    { id: 't1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor', location_ref: 'Trade Products' },
-  ];
-  await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'vendor', to: 'hall', qty: 1,
-    fromRef: 'Marathon', ids: ['m1'] });
-  assert.equal(store.db.boxes.find((b) => b.id === 'm1').location, 'hall');
-  assert.equal(store.db.boxes.find((b) => b.id === 't1').location, 'vendor');
-});
-
-test('a move stamps a sighting whichever way it goes', async () => {
-  const store = shortStore();
-  store.db.boxes = [{ id: 'f1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' }];
-  await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'hall', to: 'storage', qty: 1, ref: 'Unit 14' });
-  const b = store.db.boxes[0];
-  assert.equal(b.location, 'storage');
-  assert.equal(b.location_ref, 'Unit 14');
-  // someone just physically handled it; landing straight in the "never confirmed"
-  // banner would train people to ignore the banner
-  assert.ok(b.counted_at, 'moving stock out is still a sighting');
-});
-
-test('moving stock refuses an unknown destination', async () => {
-  const store = shortStore();
-  store.db.boxes = [{ id: 'f1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' }];
-  await assert.rejects(
-    () => store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'hall', to: 'garage', qty: 1 }),
-    /Unknown location/);
-});
-
-test('moving stock leaves boxes racked for a session alone', async () => {
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'tagged', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', session_tag: 'Fri PM' },
-    { id: 'free', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' },
-  ];
-  await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'hall', to: 'storage', qty: 1 });
-  assert.equal(store.db.boxes.find((b) => b.id === 'tagged').location, undefined,
-    'a box set aside for a session must not be shipped out from under Assign');
-  assert.equal(store.db.boxes.find((b) => b.id === 'free').location, 'storage');
-});
-
-test('the scanner will not open a box that is recorded off-site', () => {
-  // Reported bug: OpenBoxes guarded its manual serial field but the scanner —
-  // the primary input — went through resolveScan, which never looked at location.
-  // Scanning twice would walk a vendor box to sold_out and out of owned stock.
-  const off = [{ id: 'v', serial: 'X1', state: 'in_inventory', location: 'vendor', location_ref: 'Marathon' }];
-  const r = resolveScan('X1', { mode: 'open', boxes: off });
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, 'offsite');
-  assert.match(r.message, /Marathon/);
-  // sold-out mode too
-  const opened = [{ id: 'v', serial: 'X2', state: 'opened', location: 'storage' }];
-  assert.equal(resolveScan('X2', { mode: 'soldout', boxes: opened }).reason, 'offsite');
-  // but a floor box still works, and receiving is exempt — receiving is what puts
-  // a box somewhere in the first place
-  assert.equal(resolveScan('X3', { mode: 'open', boxes: [{ serial: 'X3', state: 'in_inventory' }] }).ok, true);
-});
-
-test('same-day confirmation reads as today, not yesterday', () => {
-  const today = new Date(2026, 7, 18, 14, 30);
-  assert.equal(daysSinceConfirmed({ counted_at: '2026-08-18' }, today), 0);
-  assert.equal(daysSinceConfirmed({ counted_at: '2026-08-11' }, today), 7);
-  assert.equal(daysSinceConfirmed({ counted_at: null }, today), null);
-});
-
-test('an adjustment refuses rather than quietly taking off fewer than asked', async () => {
-  // It used to write off whatever the floor had and still log the full delta, so
-  // the history claimed five boxes were written off when two were. addAdjustment
-  // already refused; the two entry points must not disagree.
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'f0', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' },
-    ...Array.from({ length: 5 }, (_, i) => ({ id: 'v' + i, hall_id: 'sc', product_id: 'G1',
-      state: 'in_inventory', location: 'vendor' })),
-  ];
-  await assert.rejects(
-    () => store.adjustStock({ hallId: 'sc', product: store.db.products[0], delta: -5, note: 'x' }),
-    /Only 1 on the floor/);
-  assert.equal(store.db.boxes.filter((b) => b.state === 'missing').length, 0, 'nothing written');
-  assert.equal(store.db.boxes.filter((b) => b.location === 'vendor').length, 5);
-});
-
-test('sending stock off-site takes a sealed box, not a part-sold one', async () => {
-  // the picker counts sealed stock, so the move has to take sealed stock —
-  // otherwise the half-sold box silently leaves the floor and Open Boxes
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'opened', hall_id: 'sc', product_id: 'G1', state: 'opened', received_at: '2026-01-01' },
-    { id: 'sealed', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', received_at: '2026-08-01' },
-  ];
-  await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'hall', to: 'storage', qty: 1,
-    states: ['in_inventory'] });
-  assert.equal(store.db.boxes.find((b) => b.id === 'sealed').location, 'storage');
-  assert.equal(store.db.boxes.find((b) => b.id === 'opened').location, undefined);
-});
-
-test('a box someone else already moved does not change which boxes ship', async () => {
-  // the ids path used to slice the caller's list before filtering, so one stale
-  // id shifted the selection — and the two stores disagreed about the result
-  const store = shortStore();
-  store.db.boxes = [
-    { id: 'v1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'hall' },
-    { id: 'v2', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor' },
-    { id: 'v3', hall_id: 'sc', product_id: 'G1', state: 'in_inventory', location: 'vendor' },
-  ];
-  const r = await store.moveBoxes({ hallId: 'sc', productId: 'G1', from: 'vendor', to: 'hall',
-    qty: 2, ids: ['v1', 'v2', 'v3'] });
-  assert.deepEqual(r.ids, ['v2', 'v3']);
-});
-
-test('a failed multi-line adjustment leaves nothing behind', async () => {
-  const store = shortStore();
-  store.db.products.push({ id: 'G9', name: 'Ghost Game', base_cost: 50, pack_units: 1, split_boxes: 1 });
-  store.db.boxes = [{ id: 'a1', hall_id: 'sc', product_id: 'G1', state: 'in_inventory' }];
-  await assert.rejects(() => store.addAdjustment({
-    hallId: 'sc', reason: 'damaged', note: 'two lines, second impossible',
-    lines: [{ product_id: 'G1', delta: -1 }, { product_id: 'G9', delta: -1 }],
-  }));
-  assert.equal(store.db.boxes[0].state, 'in_inventory', 'the first line was rolled back');
-  assert.equal((store.db.stock_adjustments || []).length, 0, 'no orphan header');
-  assert.equal((store.db.stock_adjustment_lines || []).length, 0, 'no orphan lines');
-});
-
-// ---------- hiding games per hall ----------
-import { hiddenSet, isHidden, splitVisible, hiddenStockSummary, hiddenNote, hiddenLast }
-  from '../src/lib/logic/hidden.js';
-
-test('hiddenSet keeps one hall out of the other hall\'s business', () => {
-  const rows = [
-    { hall_id: 'sc',  product_id: 'P278' },
-    { hall_id: 'rwc', product_id: 'C1787197160866' },
-    { hall_id: 'rwc', product_id: 'H027' },
-  ];
-  assert.deepEqual([...hiddenSet(rows, 'sc')], ['P278']);
-  assert.deepEqual([...hiddenSet(rows, 'rwc')].sort(), ['C1787197160866', 'H027']);
-  // no hall given -> everything, which is what the app passes after the store
-  // has already filtered by hall
-  assert.equal(hiddenSet(rows).size, 3);
-  assert.equal(hiddenSet(null, 'sc').size, 0);
-});
-
-test('splitVisible partitions without losing or duplicating a row', () => {
-  const rows = [{ id: 'A' }, { id: 'B' }, { id: 'C' }];
-  const h = hiddenSet(['B']);
-  const { visible, hidden } = splitVisible(rows, h);
-  assert.deepEqual(visible.map((r) => r.id), ['A', 'C']);
-  assert.deepEqual(hidden.map((r) => r.id), ['B']);
-  assert.equal(visible.length + hidden.length, rows.length);
-});
-
-test('splitVisible reads Inventory rows, which nest the product', () => {
-  const rows = [{ p: { id: 'A' } }, { p: { id: 'B' } }];
-  const { visible } = splitVisible(rows, hiddenSet(['A']), (r) => r.p.id);
-  assert.deepEqual(visible.map((r) => r.p.id), ['B']);
-});
-
-test('hidden stock is reported, never quietly dropped', () => {
-  // the whole safety argument: hiding is a view filter, so the boxes behind it
-  // have to keep being counted and have to keep being mentioned
-  const rows = [
-    { id: 'P278', boxes: 5, value: 210 },
-    { id: 'H027', boxes: 0, value: 0 },
-    { id: 'OK',   boxes: 9, value: 400 },
-  ];
-  const s = hiddenStockSummary(rows, hiddenSet(['P278', 'H027']), (r) => r.id,
-    (r) => ({ boxes: r.boxes, value: r.value }));
-  assert.equal(s.count, 2, 'both hidden games counted');
-  assert.equal(s.withStock, 1, 'only one of them still holds boxes');
-  assert.equal(s.boxes, 5);
-  assert.equal(s.value, 210);
-  assert.match(hiddenNote(s), /5 boxes still on the floor/);
-  assert.match(hiddenNote(s), /counted in the totals above/);
-});
-
-test('the hidden note says nothing when there is nothing to say', () => {
-  assert.equal(hiddenNote(hiddenStockSummary([{ id: 'A' }], hiddenSet([]))), null);
-  const none = hiddenStockSummary([{ id: 'A' }], hiddenSet(['A']), (r) => r.id, () => ({ boxes: 0 }));
-  assert.equal(hiddenNote(none), '1 game hidden at this hall.');
-});
-
-test('the game picker sinks a hall\'s put-away records without dropping them', () => {
-  // Red White & Blue is three records; RWC has put the Marathon one away
-  const h = hiddenSet(['P278']);
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  const list = [
-    { id: 'P278', name: 'Red,White and Blue paper' },
-    { id: 'C178', name: 'Red White and Blue Paper' },
-    { id: 'H027', name: 'Red White & Blue Balls' },
-  ].sort((a, b) => hiddenLast(a, b, h) || byName(a, b));
-  assert.equal(list[list.length - 1].id, 'P278', 'the put-away record sorts last');
-  assert.equal(list.length, 3, 'and is still in the list — sorted, never filtered');
-  // stable when nothing is hidden, so the ordinary case is plain alphabetical
-  const plain = [{ id: 'B', name: 'B' }, { id: 'A', name: 'A' }]
-    .sort((a, b) => hiddenLast(a, b, hiddenSet([])) || byName(a, b));
-  assert.deepEqual(plain.map((p) => p.id), ['A', 'B']);
-});
-
-test('hiding a game touches no box, no cost and no state', async () => {
-  const store = shortStore();
-  const before = JSON.stringify(store.db.boxes);
-  await store.setHidden('sc', 'G1', true, 'RWC buys the other one');
-  assert.deepEqual(await store.getHidden('sc'), ['G1']);
-  assert.equal(JSON.stringify(store.db.boxes), before, 'stock is untouched');
-  // and the other hall is unaffected
-  assert.deepEqual(await store.getHidden('rwc'), []);
-});
-
-test('hiding is idempotent, so two managers pressing Hide agree', async () => {
-  const store = shortStore();
-  await store.setHidden('sc', 'G1', true);
-  await store.setHidden('sc', 'G1', true);
-  assert.deepEqual(await store.getHidden('sc'), ['G1'], 'no duplicate row');
-  await store.setHidden('sc', 'G1', false);
-  await store.setHidden('sc', 'G1', false);
-  assert.deepEqual(await store.getHidden('sc'), []);
-});
-
-test('hiding a game that does not exist fails before it writes', async () => {
-  const store = shortStore();
-  await assert.rejects(() => store.setHidden('sc', 'NOPE', true), /No such game/);
-  assert.deepEqual(await store.getHidden('sc'), []);
-  await assert.rejects(() => store.setHidden('', 'G1', true), /needs a hall/);
-});
-
-test('unhiding leaves the other hall alone', async () => {
-  const store = shortStore();
-  await store.setHidden('sc', 'G1', true);
-  await store.setHidden('rwc', 'G1', true);
-  await store.setHidden('sc', 'G1', false);
-  assert.deepEqual(await store.getHidden('sc'), []);
-  assert.deepEqual(await store.getHidden('rwc'), ['G1'], 'RWC still hides it');
-});
-
-test('a re-hide does not wipe a reason someone typed earlier', async () => {
-  const store = shortStore();
-  await store.setHidden('sc', 'G1', true, 'RWC buys the Bingo Vision one');
-  await store.setHidden('sc', 'G1', true);          // the UI passes no note
-  assert.equal(store.db.hidden[0].note, 'RWC buys the Bingo Vision one');
-  await store.setHidden('sc', 'G1', true, 'changed my mind');
-  assert.equal(store.db.hidden[0].note, 'changed my mind', 'a real note still overwrites');
-});
-
-// ---------- how orders are dated and ranked ----------
-import { orderDate, bySentDesc, fmtOrderDate } from '../src/lib/logic/po.js';
-
-test('orders rank by the day they went out, not the day they were started', () => {
-  // the case that made the old created_at sort wrong: drafted Monday, sent Friday
-  const drafted = { num: 'A', created_at: '2026-08-24T09:00:00Z', sent_at: '2026-08-28T17:00:00Z' };
-  const quick   = { num: 'B', created_at: '2026-08-26T09:00:00Z', sent_at: '2026-08-26T10:00:00Z' };
-  assert.deepEqual([quick, drafted].sort(bySentDesc).map((p) => p.num), ['A', 'B'],
-    'the one sent latest comes first, even though it was created earliest');
-});
-
-test('an order recorded after the fact still takes its place', () => {
-  const recorded = { num: 'R', created_at: '2026-08-27T00:00:00Z', sent_at: null };
-  const sent     = { num: 'S', created_at: '2026-08-01T00:00:00Z', sent_at: '2026-08-20T00:00:00Z' };
-  assert.equal(orderDate(recorded), '2026-08-27T00:00:00Z', 'falls back to created_at');
-  assert.deepEqual([sent, recorded].sort(bySentDesc).map((p) => p.num), ['R', 'S']);
-});
-
-test('only an order with no date at all sinks to the bottom', () => {
-  const broken = { num: 'X' };
-  const ok1 = { num: 'Y', sent_at: '2026-08-01T00:00:00Z' };
-  assert.equal(orderDate(broken), null);
-  assert.deepEqual([broken, ok1].sort(bySentDesc).map((p) => p.num), ['Y', 'X']);
-  assert.equal(fmtOrderDate(broken), '—');
-  assert.equal(fmtOrderDate({ sent_at: 'not a date' }), '—', 'garbage does not render Invalid Date');
-});
-
-test('the sort is stable enough to not reorder equal dates', () => {
-  const a = { num: 'a', sent_at: '2026-08-10T00:00:00Z' };
-  const b = { num: 'b', sent_at: '2026-08-10T00:00:00Z' };
-  assert.deepEqual([a, b].sort(bySentDesc).map((p) => p.num), ['a', 'b']);
-});
-
-// ---------- settling a delivered order against what arrived ----------
-import { settleOrder } from '../src/lib/logic/settlement.js';
-
-// A Biker case: one PO line of 1 unit at $10,336, arriving as 8 totes at $1,292.
-// Comparing the ordered UNIT (1) against box rows (8) is the standing unit bug in
-// this codebase, so it is the shape every case below is built on.
-const bikerLine = {
-  id: 'l1', product_id: 'P163', name_snapshot: 'Biker - Strip',
-  qty: 1, cost: '10336.00', packing_each: '320.00', split_boxes: 8, taxable: true,
-};
-const boxesFor = (n, state = 'in_inventory', pid = 'P163') =>
-  Array.from({ length: n }, () => ({ product_id: pid, state }));
-
-test('a complete delivery owes the whole order and nothing is missing', () => {
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975 });
-  assert.equal(st.lines[0].orderedBoxes, 8, 'one ordered unit is eight boxes');
-  assert.equal(st.lines[0].arrivedBoxes, 8);
-  assert.equal(st.missing.total, 0);
-  assert.equal(st.arrived.total, st.ordered.total);
-  assert.equal(st.owed.total, st.ordered.total);
-  assert.equal(st.complete, true);
-});
-
-test('a short delivery splits the money without losing a cent', () => {
-  // 6 of 8 totes arrived; 1 still on order, 1 written off missing
-  const boxes = [...boxesFor(6), ...boxesFor(1, 'on_order'), ...boxesFor(1, 'missing')];
-  const st = settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975 });
-  assert.equal(st.lines[0].arrivedBoxes, 6);
-  assert.equal(st.lines[0].missingBoxes, 2);
-  assert.equal(st.complete, false);
-  assert.equal(st.shortLines, 1);
-  // the invariant that makes this safe to pay from: nothing evaporates
-  assert.equal(round2(st.arrived.total + st.missing.total), st.ordered.total);
-  // goods AND packing are both pro-rated — billing full collation on a short
-  // case is the exact bug receiving.js was written to stop
-  assert.equal(st.arrived.packing, 240);      // 6/8 of $320
-  assert.equal(st.missing.packing, 80);
-});
-
-test('opened and sold-out boxes still count as arrived', () => {
-  // stock that came in and was played is not missing — it is the most arrived a
-  // box can be, and counting only in_inventory would demand a credit for it
-  const boxes = [...boxesFor(3), ...boxesFor(3, 'opened'), ...boxesFor(2, 'sold_out')];
-  const st = settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975 });
-  assert.equal(st.lines[0].arrivedBoxes, 8);
-  assert.equal(st.missing.total, 0);
-});
-
-test('the invoice is compared against what arrived, not what was ordered', () => {
-  const boxes = [...boxesFor(6), ...boxesFor(2, 'on_order')];
-  const full = settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975, invoiced: 11663.76 });
-  assert.ok(full.overbilled > 0, 'billed for the full order but only 6 of 8 came');
-  assert.equal(full.overbilled, round2(11663.76 - full.arrived.total));
-  const fair = settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975,
-    invoiced: settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975 }).arrived.total });
-  assert.equal(fair.overbilled, 0, 'an invoice matching the delivery shows no gap');
-  assert.equal(settleOrder({ lines: [bikerLine], boxes }).overbilled, null,
-    'no invoice recorded means no comparison, not a zero');
-});
-
-test('a delivery charge has no stock and can never be short', () => {
-  const fee = { id: 'f1', product_id: null, kind: 'fee', name_snapshot: 'Delivery',
-    qty: 1, cost: '45.00', packing_each: 0, split_boxes: 1, taxable: false };
-  const st = settleOrder({ lines: [fee], boxes: [], taxRate: 0.0975 });
-  assert.equal(st.lines[0].isCharge, true);
-  assert.equal(st.lines[0].missingBoxes, 0, 'a charge cannot fail to turn up');
-  assert.equal(st.arrived.total, 45);
-  assert.equal(st.arrived.tax, 0, 'and an exempt line is not taxed');
-});
-
-test('an unpriced line is excluded from every total and reported', () => {
-  // the failure this prevents: an invoice that looks fully covered while one line
-  // is still "?", so the hall underpays and nobody notices
-  const tbd = { ...bikerLine, id: 'l2', price_tbd: true, cost: 0, packing_each: 0 };
-  const st = settleOrder({ lines: [bikerLine, tbd], boxes: boxesFor(16), taxRate: 0.0975 });
-  assert.equal(st.tbdLines, 1);
-  assert.equal(st.ordered.goods, 10336, 'only the priced line is counted');
-});
-
-test('tax follows the taxable goods that arrived, at the order\'s own rate', () => {
-  const exempt = { ...bikerLine, id: 'l3', product_id: 'S1', taxable: false,
-    qty: 1, cost: '100.00', packing_each: 0, split_boxes: 1 };
-  const boxes = [...boxesFor(8), ...boxesFor(1, 'in_inventory', 'S1')];
-  const st = settleOrder({ lines: [bikerLine, exempt], boxes, taxRate: 0.0975 });
-  assert.equal(st.arrived.taxable, 10336, 'the exempt line is outside the taxable base');
-  assert.equal(st.arrived.tax, round2(10336 * 0.0975));
-  assert.equal(st.arrived.goods, 10436);
-});
-
-test('a delivery can be wrong in the other direction too', () => {
-  // they sent 11 totes against an order for 8, and the hall is keeping them.
-  // Capping at the ordered quantity hides that and understates what we owe.
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(11), taxRate: 0.0975 });
-  assert.equal(st.lines[0].arrivedBoxes, 8, 'the ordered part is still the ordered part');
-  assert.equal(st.lines[0].extraBoxes, 3);
-  assert.equal(st.lines[0].missingBoxes, 0, 'nothing is short');
-  assert.ok(st.owed.total > st.ordered.total, 'we owe more than we ordered');
-  assert.ok(st.net > 0, 'net is positive: we are holding unbilled stock');
-});
-
-test('extra stock is billed as goods, not as more packing', () => {
-  // packing is charged once on the case that was ordered; three spare totes do
-  // not earn another three lots of collation
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(11), taxRate: 0.0975 });
-  assert.equal(st.extra.packing, 0);
-  assert.equal(st.extra.goods, round2(3 * st.lines[0].perBox));
-});
-
-test('stock delivered against an order but not on it still counts', () => {
-  // a substitution: Bingo Vision ran out and sent something else instead
-  const boxes = [...boxesFor(8), { product_id: 'P999', state: 'in_inventory', cost: '250.00' }];
-  const st = settleOrder({ lines: [bikerLine], boxes, taxRate: 0.0975 });
-  const off = st.lines.find((l) => l.offOrder);
-  assert.ok(off, 'the off-order product gets its own row');
-  assert.equal(off.extraBoxes, 1);
-  assert.equal(off.extraValue, 250, 'valued from the box, since there is no line');
-  assert.equal(off.orderedBoxes, 0);
-  assert.equal(st.extraLines, 1);
-});
-
-test('short and extra can happen on the same order and net out', () => {
-  const second = { ...bikerLine, id: 'l2', product_id: 'P200',
-    name_snapshot: 'Other', qty: 1, cost: '800.00', packing_each: '0', split_boxes: 4 };
-  const boxes = [
-    ...boxesFor(6),                                   // 6 of 8 — short 2
-    ...boxesFor(6, 'in_inventory', 'P200'),           // 6 of 4 — extra 2
-  ];
-  const st = settleOrder({ lines: [bikerLine, second], boxes, taxRate: 0.0975 });
-  assert.equal(st.shortLines, 1);
-  assert.equal(st.extraLines, 1);
-  assert.equal(st.net, round2(st.extra.total - st.missing.total));
-  // the invariant that keeps this honest: what we owe is what is on the shelf
-  assert.equal(st.owed.total, round2(st.arrived.total + st.extra.total));
-});
-
-test('an order that is exactly right is complete in both directions', () => {
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975 });
-  assert.equal(st.complete, true);
-  assert.equal(st.net, 0);
-  assert.equal(st.owed.total, st.ordered.total);
-});
-
-test('settling an order with no lines is empty, not a crash', () => {
-  const st = settleOrder({});
-  assert.deepEqual(st.lines, []);
-  assert.equal(st.ordered.total, 0);
-  assert.equal(st.complete, true);
-});
-
-// ---------- renaming a game must never cost it a match ----------
-
-test('renaming a product keeps the old name as an alias', async () => {
-  // the exact case: a game reclassified from flash to strip and given a suffix.
-  // Session sheets still say "In Laws", and they have to go on matching.
-  const store = shortStore();
-  store.db.products.push({ id: 'P300', name: 'In Laws', type: 'flash', aliases: [] });
-  await store.updateProduct('P300', { name: 'In Laws - Strip', type: 'strip' });
-  const p = store.db.products.find((x) => x.id === 'P300');
-  assert.equal(p.name, 'In Laws - Strip', 'the rename happened');
-  assert.deepEqual(p.aliases, ['In Laws'], 'and the old spelling still matches');
-  assert.equal(p.type, 'strip', 'other fields update as normal');
-});
-
-test('renaming twice keeps every spelling the sheets might use', async () => {
-  const store = shortStore();
-  store.db.products.push({ id: 'P1x', name: 'First', aliases: [] });
-  await store.updateProduct('P1x', { name: 'Second' });
-  await store.updateProduct('P1x', { name: 'Third' });
-  assert.deepEqual(store.db.products.find((x) => x.id === 'P1x').aliases, ['First', 'Second']);
-});
-
-test('an update that is not a rename adds no alias', async () => {
-  const store = shortStore();
-  store.db.products.push({ id: 'P2x', name: 'Same', aliases: [] });
-  await store.updateProduct('P2x', { base_cost: 42 });
-  await store.updateProduct('P2x', { name: 'Same' });              // unchanged
-  await store.updateProduct('P2x', { name: '  Same  ' });          // whitespace only
-  assert.deepEqual(store.db.products.find((x) => x.id === 'P2x').aliases, []);
-});
-
-test('re-casing a name does not pile up near-duplicate aliases', async () => {
-  const store = shortStore();
-  store.db.products.push({ id: 'P3x', name: 'Biker Betty', aliases: ['biker betty'] });
-  await store.updateProduct('P3x', { name: 'Biker Betty - Strip' });
-  assert.deepEqual(store.db.products.find((x) => x.id === 'P3x').aliases, ['biker betty'],
-    'the old name was already covered case-insensitively');
-});
-
-// ---------- a game keeps its identity through a rename ----------
-import { matchKey, keysFor, nameMatches, candidatesFor, searchMatches }
-  from '../src/lib/logic/naming.js';
-
-test('the type tag someone appends to a title does not change the game', () => {
-  // the live case: a flash game reclassified as a strip and tagged in its title
-  assert.equal(matchKey('In Laws - Strip'), matchKey('In Laws'));
-  assert.equal(matchKey('In Laws (Strip)'), matchKey('In Laws'));
-  assert.equal(matchKey('In Laws -strip'), matchKey('In Laws'));
-  assert.equal(matchKey('IN-LAWS - STRIP'), matchKey('in laws'));
-  // and the tier suffixes the distributor's own list carries
-  assert.equal(matchKey('In Laws 180x8'), matchKey('In Laws'));
-  assert.equal(matchKey('Golden Carrot 2600/$1'), matchKey('Golden Carrot'));
-});
-
-test('a sheet still matches a renamed game even with no alias recorded', () => {
-  // belt and braces: the database trigger keeps the old name, but a product
-  // loaded by any other route may have no alias at all, and the sheets do not
-  // know that. Normalising the suffix away covers it either way.
-  assert.equal(nameMatches({ name: 'Hot Mama - Strip' }, 'Hot Mama'), true);
-  assert.equal(nameMatches({ name: 'Hot Mama' }, 'Hot Mama - Strip'), true);
-});
-
-test('every name a product has held is a way to find it', () => {
-  const p = { name: 'In Laws - Strip', orig_name: 'In Laws 180x8', aliases: ['In Laws'] };
-  const k = keysFor(p);
-  assert.equal(k.size, 1, 'all three spellings collapse to one key');
-  for (const raw of ['In Laws', 'in laws', 'IN-LAWS', 'In Laws 180x8', 'In Laws (Strip)']) {
-    assert.equal(nameMatches(p, raw), true, raw);
+test('money formats even when Postgres sends a string', () => {
+  assert.equal(fmtMoney('1806'), '$1,806.00');
+});
+test('the delivered email asks accounting to pay for what arrived, not the PO', () => {
+  const po = { num: 'BC-1', total: 940 };
+  const line = { name_snapshot: 'Jackpot Derby', qty: 2, cost: 470, packing_each: 0, split_boxes: 1 };
+  const got = [receivedLine(line, G2, 1, 470)];
+  const miss = [missingLine(line, G2, 1, 470)];
+  const e = buildDeliveredEmail(po, vendors[1], 'BC', 'INV-1', got, miss, {}, '');
+  assert.equal(e.amount, 470);
+  assert.match(e.subject, /short delivery/);
+  assert.match(buildShortageEmail(po, vendors[1], 'BC', miss).body, /\$470\.00/);
+});
+
+// ---------------------------------------------------------------- the report
+const at = (y, m, d, h = 18) => new Date(y, m - 1, d, h, 0, 0).toISOString();
+const reportBoxes = [
+  { id: 'a', product_id: 'G1', serial: '1', state: 'sold_out', opened_at: at(2026, 10, 1), sold_out_at: at(2026, 10, 2), shipment_id: 's1', cost: 0 },
+  { id: 'b', product_id: 'G2', serial: '2', state: 'closed_unsold', opened_at: at(2026, 10, 2), closed_at: at(2026, 10, 2, 23), tickets_remaining: 88, cost: 470 },
+  { id: 'c', product_id: 'G2', serial: '3', state: 'opened', opened_at: at(2026, 10, 2), tickets_remaining: 125 },
+  { id: 'd', product_id: 'G1', serial: '4', state: 'sold_out', opened_at: at(2026, 9, 28), sold_out_at: at(2026, 10, 3), cost: 0 },
+  { id: 'e', product_id: 'G1', serial: '5', state: 'in_inventory' },
+];
+const rep = (from, to) => buildReport({
+  boxes: reportBoxes, products: [G(), G2], vendors,
+  shipments: [{ id: 's1', invoice_no: '55102', received_on: '2026-09-30' }], period: { from, to },
+});
+test('closed in a day lists every sold-out and closed-unsold box, not open ones', () => {
+  const r = rep('2026-10-02', '2026-10-02');
+  assert.deepEqual(r.closed.map((x) => x.b.id).sort(), ['a', 'b']);
+  assert.equal(r.summary.soldOut, 1);
+  assert.equal(r.summary.closedUnsold, 1);
+});
+test('a box opened last month and sold out this month is in this month\'s closed list', () => {
+  const r = rep(...Object.values(monthBounds('2026-10')));
+  assert.ok(r.closed.some((x) => x.b.id === 'd'));
+  assert.ok(!r.opened.some((x) => x.b.id === 'd'));
+});
+test('opened in period lists boxes by the day they were opened', () => {
+  assert.deepEqual(rep('2026-10-02', '2026-10-02').opened.map((x) => x.b.id).sort(), ['b', 'c']);
+});
+test('still open counts boxes open at the end of the last day', () => {
+  assert.equal(rep('2026-10-02', '2026-10-02').summary.stillOpen, 2);   // c, and d (closes the 3rd)
+  assert.equal(rep('2026-10-03', '2026-10-03').summary.stillOpen, 1);   // c
+});
+test('a row carries the receipt\'s invoice, the open/close times and the game attributes', () => {
+  const row = rep('2026-10-02', '2026-10-02').closed.find((x) => x.b.id === 'a');
+  assert.equal(row.invoiceNo, '55102');
+  assert.equal(row.invoiceDate, '2026-09-30');
+  assert.equal(row.status, 'Sold out');
+  assert.equal(row.g.form_number, 'CR3');
+  assert.equal(row.vendor, 'Liberty Gaming');
+  assert.ok(row.b.opened_at && row.closedAt);
+});
+test('a closed-unsold row shows its tickets left', () => {
+  assert.equal(rep('2026-10-02', '2026-10-02').closed.find((x) => x.b.id === 'b').left, 88);
+});
+test('summary money counts sold-out boxes only', () => {
+  const s = rep('2026-10-02', '2026-10-02').summary;
+  assert.equal(s.idealGross, 945);
+  assert.equal(s.idealCashPrize, 665);
+  assert.equal(s.costClosed, 470);
+});
+test('period edges are local calendar days', () => {
+  assert.ok(inPeriod(at(2026, 10, 2, 23), { from: '2026-10-02', to: '2026-10-02' }));
+  assert.ok(!inPeriod(at(2026, 10, 3, 0), { from: '2026-10-02', to: '2026-10-02' }));
+  assert.deepEqual(monthBounds('2026-02'), { from: '2026-02-01', to: '2026-02-28' });
+});
+
+// ---------------------------------------------------------------- the store, end to end
+async function freshStore() {
+  mem.clear();
+  const s = new DemoStore(false);
+  await s.init();
+  return s;
+}
+const prod = async (s, form) => (await s.getProducts()).find((p) => p.form_number === form);
+
+test('sending a PO puts placeholder boxes on order', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const drafts = buildDrafts({ [g.id]: 3 }, await s.getProducts(), await s.getVendors());
+  const [po] = await s.createSentPos('bc', drafts, drafts.map((d) => ({ ...d, num: 'BC-T-1' })));
+  const boxes = (await s.getBoxes('bc')).filter((b) => b.po_id === po.id);
+  assert.equal(boxes.length, 3);
+  assert.ok(boxes.every((b) => b.state === 'on_order' && b.source === 'po' && !b.serial));
+});
+
+test('receiving against a PO claims placeholders, then creates boxes past the order', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const drafts = buildDrafts({ [g.id]: 1 }, await s.getProducts(), await s.getVendors());
+  const [po] = await s.createSentPos('bc', drafts, drafts.map((d) => ({ ...d, num: 'BC-T-2' })));
+  const sh = await s.createShipment({ hall_id: 'bc', po_id: po.id, invoice_no: 'I-1', received_on: '2026-10-20' });
+  const a = await s.receiveBox({ hallId: 'bc', shipmentId: sh.id, poId: po.id, product: g, serial: '100', receivedOn: '2026-10-20' });
+  const b = await s.receiveBox({ hallId: 'bc', shipmentId: sh.id, poId: po.id, product: g, serial: '101', receivedOn: '2026-10-20' });
+  assert.equal(a.source, 'po');
+  assert.equal(b.source, 'receive');
+  const mine = (await s.getBoxes('bc')).filter((x) => x.shipment_id === sh.id);
+  assert.equal(mine.length, 2);
+  assert.ok(mine.every((x) => x.state === 'in_inventory' && x.received_on === '2026-10-20' && x.game_snapshot?.form_number === 'CR3'));
+  await assert.rejects(() => s.receiveBox({ hallId: 'bc', product: g, serial: '100' }), /already received/);
+});
+
+test('undoing a receive puts a placeholder back on order and removes a created box', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const drafts = buildDrafts({ [g.id]: 1 }, await s.getProducts(), await s.getVendors());
+  const [po] = await s.createSentPos('bc', drafts, drafts.map((d) => ({ ...d, num: 'BC-T-3' })));
+  const a = await s.receiveBox({ hallId: 'bc', poId: po.id, product: g, serial: '1' });
+  const b = await s.receiveBox({ hallId: 'bc', product: g, serial: '2' });
+  await s.undoReceiveBox(a.id);
+  await s.undoReceiveBox(b.id);
+  const all = await s.getBoxes('bc');
+  assert.equal(all.find((x) => x.id === a.id).state, 'on_order');
+  assert.equal(all.find((x) => x.id === a.id).serial, '');
+  assert.equal(all.find((x) => x.id === b.id), undefined);
+});
+
+test('open → remainder → remainder → sold out keeps every count', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '9' });
+  const opened = await s.openBox(box.id, { openedOn: '2026-10-20' });
+  assert.equal(opened.opened_on, '2026-10-20');
+  assert.ok(opened.opened_at);
+  await s.recordRemainder(box.id, 400, { sessionDate: '2026-10-20' });
+  await s.recordRemainder(box.id, 125, { sessionDate: '2026-10-21' });
+  let b = (await s.getBoxes('bc')).find((x) => x.id === box.id);
+  assert.equal(b.state, 'opened');
+  assert.equal(b.tickets_remaining, 125);
+  assert.deepEqual((await s.getBoxCounts('bc')).filter((c) => c.box_id === box.id).map((c) => c.tickets_left), [400, 125]);
+  await assert.rejects(() => s.recordRemainder(box.id, 2000), /945/);
+  await s.soldOut(box.id);
+  b = (await s.getBoxes('bc')).find((x) => x.id === box.id);
+  assert.equal(b.state, 'sold_out');
+  assert.equal(b.tickets_remaining, 0);
+  assert.ok(b.sold_out_at);
+});
+
+test('close unsold records the tickets left; reopening restores the last remainder', async () => {
+  const s = await freshStore();
+  const g = await prod(s, '52266');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '77' });
+  await s.openBox(box.id);
+  await s.recordRemainder(box.id, 300);
+  await s.closeUnsold(box.id, 88);
+  let b = (await s.getBoxes('bc')).find((x) => x.id === box.id);
+  assert.equal(b.state, 'closed_unsold');
+  assert.equal(b.tickets_remaining, 88);
+  assert.ok(b.closed_at);
+  await s.reopenBox(box.id);
+  b = (await s.getBoxes('bc')).find((x) => x.id === box.id);
+  assert.equal(b.state, 'opened');
+  assert.equal(b.closed_at, null);
+  assert.equal(b.tickets_remaining, 300);
+});
+
+test('a remainder can only be logged on an open box', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '5' });
+  await assert.rejects(() => s.recordRemainder(box.id, 10), /open box/);
+});
+
+test('every action leaves a labelled line in History', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '6' });
+  await s.openBox(box.id);
+  await s.recordRemainder(box.id, 50);
+  await s.soldOut(box.id);
+  const kinds = (await s.getEvents(20)).map((e) => e.kind);
+  for (const k of ['box.receive', 'box.open', 'box.remainder', 'box.soldout']) assert.ok(kinds.includes(k), k);
+});
+
+test('the training sandbox has boxes at every stage, each closed box with its times', async () => {
+  mem.clear();
+  const s = new DemoStore(true);
+  await s.init();
+  const boxes = await s.getBoxes('bc');
+  for (const st of ['on_order', 'in_inventory', 'opened', 'sold_out', 'closed_unsold', 'missing']) {
+    assert.ok(boxes.some((b) => b.state === st), st);
   }
-});
-
-test('normalising names does not merge games that are actually different', () => {
-  assert.notEqual(matchKey('Big Daddy'), matchKey('Big Pickle'));
-  assert.notEqual(matchKey('Monster'), matchKey('Monster Horse'));
-  assert.notEqual(matchKey('Biker Betty'), matchKey('Biker'));
-  // a name that is ONLY a type word must not collapse to nothing and swallow others
-  assert.notEqual(matchKey('Strip Daddy'), matchKey('Cat & Mouse'));
-  assert.equal(matchKey('Strip Daddy'), 'stripdaddy', 'a leading type word is not a suffix');
-});
-
-test('double-suffixing stays visible instead of being papered over', () => {
-  // only ONE trailing tag is removed, so a mistake shows up rather than hiding
-  assert.notEqual(matchKey('Biker - Strip - Strip'), matchKey('Biker'));
-});
-
-test('two products sharing a key are both returned, not silently picked', () => {
-  // Fire Balls genuinely exists twice; the caller has to resolve it, and a
-  // matcher that guesses is worse than one that asks
-  const products = [
-    { id: 'A', name: 'Fire Balls' },
-    { id: 'B', name: 'Fire Balls - Strip' },
-    { id: 'C', name: 'Something Else' },
-  ];
-  assert.deepEqual(candidatesFor(products, 'Fire Balls').map((p) => p.id), ['A', 'B']);
-});
-
-test('the picker finds a game by the name people still call it', () => {
-  const p = { name: 'In Laws - Strip', aliases: ['In Laws'] };
-  assert.equal(searchMatches(p, 'In Laws'), true, 'the old name');
-  assert.equal(searchMatches(p, 'strip'), true, 'the new name');
-  assert.equal(searchMatches(p, 'inlaws'), true, 'typed without the space');
-  assert.equal(searchMatches(p, ''), true, 'an empty search shows everything');
-  assert.equal(searchMatches(p, 'Monster'), false);
-});
-
-test('renaming through the store still records the old name', async () => {
-  // the store does this as well as the database trigger, because demo mode has
-  // no database and must behave identically
-  const store = shortStore();
-  store.db.products.push({ id: 'P9x', name: 'Was This', aliases: [] });
-  await store.updateProduct('P9x', { name: 'Now That - Strip', type: 'strip' });
-  const p = store.db.products.find((x) => x.id === 'P9x');
-  assert.deepEqual(p.aliases, ['Was This']);
-  assert.equal(nameMatches(p, 'Was This'), true);
-  assert.equal(nameMatches(p, 'Now That'), true);
-});
-
-// ---------- the email that asks a distributor to put an invoice right ----------
-import { buildSettlementEmail } from '../src/lib/logic/emails.js';
-
-const vendorBV = { id: 'bv', name: 'Bingo Vision', email: 'scott@bv.test', contact_name: 'Scott' };
-const poRef = (num) => ({ num, vendor_id: 'bv' });
-
-test('an order that arrived exactly right produces no chase email', () => {
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975,
-    invoiced: settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975 }).owed.total });
-  assert.equal(buildSettlementEmail(vendorBV, 'SC', [{ po: poRef('X'), settlement: st }]), null,
-    'nothing to say means no email, not an empty one');
-});
-
-test('a short delivery asks for a credit', () => {
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(6), taxRate: 0.0975, invoiced: 11663.76 });
-  const e = buildSettlementEmail(vendorBV, 'Santa Clara', [{ po: poRef('SC-1'), settlement: st }]);
-  assert.equal(e.to, 'scott@bv.test');
-  assert.match(e.subject, /Short delivery on SC-1/);
-  assert.match(e.body, /credit requested/);
-  assert.doesNotMatch(e.body, /add to invoice/, 'we are not offering to pay more');
-});
-
-test('extra stock we keep asks to be invoiced, not credited', () => {
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(11), taxRate: 0.0975, invoiced: 11663.76 });
-  const e = buildSettlementEmail(vendorBV, 'Santa Clara', [{ po: poRef('SC-2'), settlement: st }]);
-  assert.match(e.body, /extra, which we are keeping/);
-  assert.match(e.body, /please add to invoice/);
-  assert.match(e.body, /we'll pay the difference/);
-  assert.doesNotMatch(e.body, /credit requested/);
-});
-
-test('the email prints the figure the credit is actually derived from', () => {
-  // "we make it" must equal invoiced minus the credit, or the vendor cannot check it
-  const st = settleOrder({ lines: [bikerLine], boxes: boxesFor(6), taxRate: 0.0975, invoiced: 11663.76 });
-  const e = buildSettlementEmail(vendorBV, 'SC', [{ po: poRef('SC-3'), settlement: st }]);
-  assert.ok(e.body.includes(fmtMoney(st.owed.total)), 'the owed figure is printed');
-  assert.match(e.body, /we make it:/);
-  assert.equal(round2(st.invoiced - st.owed.total), st.overbilled);
-});
-
-test('one email can cover every outstanding order for a distributor', () => {
-  const shortSt = settleOrder({ lines: [bikerLine], boxes: boxesFor(6), taxRate: 0.0975, invoiced: 11663.76 });
-  const fineSt = settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975,
-    invoiced: settleOrder({ lines: [bikerLine], boxes: boxesFor(8), taxRate: 0.0975 }).owed.total });
-  const e = buildSettlementEmail(vendorBV, 'SC', [
-    { po: poRef('SC-A'), settlement: shortSt },
-    { po: poRef('SC-B'), settlement: fineSt },       // nothing wrong — must be left out
-    { po: poRef('SC-C'), settlement: shortSt },
-  ]);
-  assert.match(e.subject, /2 orders/, 'the clean order is not counted');
-  assert.match(e.body, /SC-A/);
-  assert.match(e.body, /SC-C/);
-  assert.doesNotMatch(e.body, /SC-B/, 'padding a chase email with fine orders hides the problem');
-});
-
-// ---------- the monthly summary at the bottom of Accounting ----------
-import { monthlyByVendor, monthsPresent, monthLabel, monthOf }
-  from '../src/lib/logic/settlement.js';
-
-const pay = (vendor_id, amount, status, created_at) => ({ vendor_id, amount, status, created_at });
-const stub = (short, extra = 0) => ({ missing: { total: short }, extra: { total: extra } });
-
-test('months are listed newest first, and only real ones', () => {
-  const ps = [pay('bv', '1', 'open', '2026-08-15T00:00:00Z'),
-              pay('bv', '1', 'open', '2026-09-01T00:00:00Z'),
-              pay('bv', '1', 'open', '2026-09-20T00:00:00Z'),
-              pay('bv', '1', 'open', null)];
-  assert.deepEqual(monthsPresent(ps), ['2026-09', '2026-08']);
-  assert.equal(monthOf(ps[3]), '');
-  assert.equal(monthLabel('2026-09'), 'September 2026');
-  assert.equal(monthLabel(''), 'All months');
-  assert.equal(monthLabel('nonsense'), 'All months');
-});
-
-test('due to pay counts open invoices only', () => {
-  // an invoice already settled is not due, and adding it back overstates what is
-  // leaving the hall this month
-  const ps = [pay('bv', '100.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('bv', '50.00', 'paid', '2026-09-02T00:00:00Z')];
-  const { rows, total } = monthlyByVendor(ps, () => stub(0), '2026-09');
-  assert.equal(rows[0].due, 100);
-  assert.equal(rows[0].paid, 50);
-  assert.equal(total.due, 100, 'paid money is reported separately, never in due');
-});
-
-test('short is netted against extra, per distributor', () => {
-  const ps = [pay('bv', '100.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('bv', '100.00', 'open', '2026-09-02T00:00:00Z')];
-  let n = 0;
-  const { rows } = monthlyByVendor(ps, () => (n++ === 0 ? stub(300, 0) : stub(0, 120)), '2026-09');
-  assert.equal(rows[0].short, 300);
-  assert.equal(rows[0].extra, 120);
-  assert.equal(rows[0].net, 180, 'one signed figure: they still owe us 180 of stock');
-});
-
-test('a distributor we owe stock to shows a negative net', () => {
-  const ps = [pay('md', '100.00', 'open', '2026-09-01T00:00:00Z')];
-  const { rows, total } = monthlyByVendor(ps, () => stub(0, 500), '2026-09');
-  assert.equal(rows[0].net, -500);
-  assert.equal(total.net, -500);
-});
-
-test('the month filter is real, and empty means every month', () => {
-  const ps = [pay('bv', '100.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('bv', '900.00', 'open', '2026-08-01T00:00:00Z')];
-  assert.equal(monthlyByVendor(ps, () => stub(0), '2026-09').total.due, 100);
-  assert.equal(monthlyByVendor(ps, () => stub(0), '2026-08').total.due, 900);
-  assert.equal(monthlyByVendor(ps, () => stub(0), '').total.due, 1000);
-});
-
-test('an order with no settlement adds to the money but not to short', () => {
-  // the quiet failure this prevents: a total that looks complete while half the
-  // orders behind it were never checked
-  const ps = [pay('bv', '100.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('bv', '200.00', 'open', '2026-09-02T00:00:00Z')];
-  let n = 0;
-  const r = monthlyByVendor(ps, () => (n++ === 0 ? stub(75) : null), '2026-09');
-  assert.equal(r.total.due, 300, 'the money is still counted');
-  assert.equal(r.total.short, 75, 'but only the checked order contributes short');
-  assert.equal(r.unsettled, 1);
-  assert.equal(r.rows[0].unsettled, 1, 'and it is attributed to the right distributor');
-});
-
-test('distributors are ranked by what they are owed', () => {
-  const ps = [pay('bv', '10.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('md', '900.00', 'open', '2026-09-01T00:00:00Z'),
-              pay('pbf', '50.00', 'open', '2026-09-01T00:00:00Z')];
-  const { rows } = monthlyByVendor(ps, () => stub(0), '2026-09');
-  assert.deepEqual(rows.map((r) => r.vendorId), ['md', 'pbf', 'bv']);
-});
-
-test('a month with no payments summarises to nothing, not a crash', () => {
-  const r = monthlyByVendor([], () => null, '2026-01');
-  assert.deepEqual(r.rows, []);
-  assert.equal(r.total.due, 0);
-  assert.equal(r.total.net, 0);
+  for (const b of boxes.filter((x) => x.state === 'sold_out' || x.state === 'closed_unsold')) {
+    assert.ok(b.opened_at && closedAt(b) && b.opened_at <= closedAt(b), b.serial);
+  }
+  assert.ok(boxes.some((b) => b.state === 'opened' && b.tickets_remaining != null));
 });

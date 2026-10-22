@@ -1,7 +1,7 @@
 import React, { useContext, useMemo, useState } from 'react';
 import { AppCtx } from '../App.jsx';
 import { buildPriceRequests } from '../lib/logic/emails.js';
-import { needsCost, needsType, needsTickets } from '../lib/logic/setup.js';
+import { needsCost, needsTickets } from '../lib/logic/setup.js';
 import { fmtMoney } from '../lib/logic/po.js';
 
 /** What we'd ask this vendor about a given game, based on what our record is missing. */
@@ -9,7 +9,6 @@ export function askFor(p) {
   const ask = [];
   if (needsCost(p)) ask.push('price');
   if (needsTickets(p)) ask.push('tickets');
-  if (needsType(p)) ask.push('type');
   return ask;
 }
 
@@ -24,8 +23,7 @@ const ASK_LABEL = { price: 'price', tickets: 'tickets', type: 'type' };
  * One email per vendor, no matter how the selection is spread across them.
  */
 export default function AskDistributor({ onClose, preselect = null }) {
-  const { hall, products, vendors, store, setToast, can } = useContext(AppCtx);
-  const hallName = hall === 'sc' ? 'Santa Clara' : 'Redwood City';
+  const { hall, hallName, products, vendors, store, setToast, can } = useContext(AppCtx);
 
   const gaps = useMemo(
     () => products.filter((p) => p.active !== false && askFor(p).length > 0),
@@ -83,7 +81,7 @@ export default function AskDistributor({ onClose, preselect = null }) {
       // sendEmails fills in the real sender identity for this hall server-side
       const logs = await store.sendEmails(emails, hall);
       await store.logEvent('price_request', 'vendors', items.map((i) => i.vendor_id).join(','), {
-        label: `${hallName} — asked ${emails.length} distributor${emails.length === 1 ? '' : 's'} about ${items.length} game${items.length === 1 ? '' : 's'}`,
+        label: `Asked ${emails.length} distributor${emails.length === 1 ? '' : 's'} about ${items.length} game${items.length === 1 ? '' : 's'}`,
         note: note.trim() || null,
       });
       setSent(logs?.length ?? emails.length);

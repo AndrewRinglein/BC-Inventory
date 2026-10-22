@@ -6,7 +6,6 @@ import { settlementForPayment, monthlyByVendor, monthsPresent, monthLabel, month
 import { buildSettlementEmail, senderFor } from '../lib/logic/emails.js';
 import { round2 } from '../lib/logic/pricing.js';
 
-const HALL_NAMES = { sc: 'Santa Clara', rwc: 'Redwood City' };
 
 /**
  * What a delivered order is actually worth, once you count what turned up.
@@ -117,7 +116,7 @@ function Detail({ st }) {
 }
 
 export default function Accounting() {
-  const { hall, payments, vendors, boxes, pos, store, reloadHall, setToast, can, settings } = useContext(AppCtx);
+  const { hall, hallName, payments, vendors, boxes, pos, store, reloadHall, setToast, can, settings } = useContext(AppCtx);
   const mayPay = can('markPaid');
   const vmap = useMemo(() => Object.fromEntries(vendors.map((v) => [v.id, v])), [vendors]);
   const rows = [...payments].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
@@ -180,7 +179,7 @@ export default function Accounting() {
     })).filter((o) => o.po && o.settlement);
     const vendor = vmap[vendorId];
     const email = buildSettlementEmail(
-      vendor, HALL_NAMES[hall], orders, senderFor(settings.sender, hall));
+      vendor, hallName, orders, senderFor(settings.sender, hall));
     if (!email) { setToast('Nothing to raise on that order'); return; }
     setNotify({ vendorId, scope, email, count: orders.length });
   };
@@ -231,7 +230,7 @@ export default function Accounting() {
   return (
     <div>
       <div className="page-head">
-        <div className="h1">Accounting — {hall === 'sc' ? 'Santa Clara' : 'Redwood City'}</div>
+        <div className="h1">Accounting</div>
         <div className="grow" />
         <span className="dim" style={{ fontSize: 13 }}>
           Open: <b className="mono">{fmtMoney(sumMoney(rows.filter((p) => p.status === 'open'), (p) => p.amount))}</b>

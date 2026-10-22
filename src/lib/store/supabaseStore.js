@@ -5,31 +5,24 @@ import { createClient } from '@supabase/supabase-js';
 import { senderFor } from '../logic/emails.js';
 import { perBoxValue } from '../logic/pricing.js';
 import { round2 } from '../logic/po.js';
-import { wantedFromPlays, consumeOrder, writeOffCost, ShortfallError } from '../logic/session.js';
+import { gameSnapshot, checkCount, atLocalNoonIso, localYmd } from '../logic/bc.js';
+import { transition } from '../logic/boxes.js';
 
 const ok = ({ data, error }) => { if (error) throw new Error(error.message); return data; };
 
-const HALLS = { sc: 'Santa Clara', rwc: 'Redwood City' };
-
-/** "Santa Clara — swapped 1 Whole Enchiladas for 1 American Heroes" */
+/** "Swapped 1 Lucky Puppy for 1 Best Friends" */
 function adjustmentLabel(hallId, reason, lines, prods) {
   const nm = (l) => prods[l.product_id]?.name || l.product_id;
   const out = lines.filter((l) => Number(l.delta) < 0);
   const inn = lines.filter((l) => Number(l.delta) > 0);
   const list = (xs) => xs.map((l) => `${Math.abs(Number(l.delta))} ${nm(l)}`).join(' and ');
-  const hall = HALLS[hallId] || hallId;
   if (reason === 'swap' && out.length && inn.length) {
-    return `${hall} — swapped ${list(out)} for ${list(inn)}`;
-  }
-  if (reason === 'transfer') {
-    const to = lines.find((l) => Number(l.delta) > 0);
-    return `${hall} — transferred ${list(out.length ? out : inn)}`
-      + (to?.hall_id && to.hall_id !== hallId ? ` to ${HALLS[to.hall_id] || to.hall_id}` : '');
+    return `Swapped ${list(out)} for ${list(inn)}`;
   }
   const word = { damaged: 'wrote off', miscount: 'recounted', found: 'found',
                  returned: 'returned to the distributor' }[reason] || 'adjusted';
   const all = [...out, ...inn];
-  return `${hall} — ${word} ${list(all)}`;
+  return `${word[0].toUpperCase()}${word.slice(1)} ${list(all)}`;
 }
 
 // PostgREST caps every response at 1000 rows and gives no warning when it truncates —
@@ -99,6 +92,9 @@ export class SupabaseStore {
     const row = { id: 'C' + Date.now(), ...p };
     return ok(await this.sb.from('products').insert(row).select().single());
   }
+  async addVendor(v) {
+    return ok(await this.sb.from('vendors').insert({ id: v.id, name: v.name, email: v.email || '' }).select().single());
+  }
   async updateVendor(id, fields) {
     return ok(await this.sb.from('vendors').update(fields).eq('id', id).select().single());
   }
@@ -150,12 +146,12 @@ export class SupabaseStore {
         Array.from({ length: l.qty * (l.split_boxes || 1) }, () => ({
           hall_id: hallId, product_id: l.product_id, po_id: po.id,
           cost: l.per_box_cost ?? l.cost, price_tbd: !!l.price_tbd, state: 'on_order',
-          ordered_at: when,
+          ordered_at: when, source: 'po',
         })));
       if (boxes.length) ok(await this.sb.from('boxes').insert(boxes));
       if (recordedOnly) {
         await this.logEvent('po.record', 'purchase_orders', po.num, {
-          label: `${hallId === 'sc' ? 'Santa Clara' : 'Redwood City'} — recorded PO ${po.num} (no email sent)`,
+          label: `Recorded PO ${po.num} (no email sent)`,
           total: po.total, vendor_id: po.vendor_id, placed_at: when, vendor_ref: vendorRef || null,
         });
       }
@@ -207,7 +203,7 @@ export class SupabaseStore {
         .eq('po_id', poId).eq('product_id', l.product_id).eq('state', 'on_order'));
     }
     await this.logEvent('po.reprice', 'purchase_orders', po.num, {
-      label: `${po.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — repriced PO ${po.num} to ${totals.total}`,
+      label: `Repriced PO ${po.num} to ${totals.total}`,
       total: po.total,
     });
     return po;
@@ -219,7 +215,7 @@ export class SupabaseStore {
       .update({ archived_at: archived ? new Date().toISOString() : null })
       .eq('id', poId).select().single());
     await this.logEvent(archived ? 'po.archive' : 'po.restore', 'purchase_orders', po.num, {
-      label: `${po.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — ${archived ? 'archived' : 'restored'} PO ${po.num}`,
+      label: `${archived ? 'Archived' : 'Restored'} PO ${po.num}`,
     });
     return po;
   }
@@ -245,7 +241,7 @@ export class SupabaseStore {
     ok(await this.sb.from('po_lines').delete().eq('po_id', poId));       // FK cascade also covers this
     ok(await this.sb.from('purchase_orders').delete().eq('id', poId));
     await this.logEvent('po.delete', 'purchase_orders', po.num, {
-      label: `${po.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — deleted PO ${po.num}`,
+      label: `Deleted PO ${po.num}`,
       total: po.total, vendor_id: po.vendor_id, boxes: boxes.length,
     });
     return po;
@@ -259,7 +255,6 @@ export class SupabaseStore {
     return ok(await this.sb.from('boxes').update({ state: toState }).eq('id', id).select().single());
   }
   async createBoxes(list) { return ok(await this.sb.from('boxes').insert(list).select()); }
-  async setBoxSession(ids, tag) { ok(await this.sb.from('boxes').update({ session_tag: tag }).in('id', ids)); }
 
   /**
    * Hand-correct the count for one product. A positive delta adds boxes straight
@@ -272,37 +267,18 @@ export class SupabaseStore {
     if (!n) return;
     if (delta > 0) {
       const rows = Array.from({ length: n }, () => ({
-        hall_id: hallId, product_id: product.id, state: 'in_inventory', location: 'hall',
+        hall_id: hallId, product_id: product.id, state: 'in_inventory', source: 'adjust',
         cost: perBoxValue(product), serial: '', received_at: new Date().toISOString(),
       }));
       ok(await this.sb.from('boxes').insert(rows));
     } else {
-      // ON THE FLOOR. An adjustment describes something that happened to stock
-      // in this hall — damaged, miscounted, found. Without this filter the write
-      // reached into boxes a distributor is holding: the operator writes off four
-      // that went missing here, four vendor boxes get marked missing instead, the
-      // floor count does not move, and they do it again until off-site drains.
       const pool = ok(await this.sb.from('boxes').select('id')
-        .eq('hall_id', hallId).eq('product_id', product.id).eq('state', 'in_inventory')
-        .eq('location', 'hall')
-        .is('session_tag', null).limit(n));
+        .eq('hall_id', hallId).eq('product_id', product.id).eq('state', 'in_inventory').limit(n));
       const ids = pool.map((b) => b.id);
-      if (ids.length < n) {   // fall back to set-aside boxes only if we must
-        const extra = ok(await this.sb.from('boxes').select('id')
-          .eq('hall_id', hallId).eq('product_id', product.id).eq('state', 'in_inventory')
-          .eq('location', 'hall')
-          .not('session_tag', 'is', null).limit(n - ids.length));
-        ids.push(...extra.map((b) => b.id));
-      }
-      // Do not silently under-apply. Taking two off when five were asked for and
-      // logging delta -5 makes the history claim something that did not happen —
-      // addAdjustment already refuses in this situation, and the two entry points
-      // must not disagree.
+      // Do not silently under-apply: logging delta -5 after taking two off would
+      // make the history claim something that did not happen.
       if (!ids.length) throw new Error('No boxes in stock to remove');
-      if (ids.length < n) {
-        throw new Error(`Only ${ids.length} on the floor — cannot take ${n} off.`
-          + ` Anything held off-site has to be brought in first.`);
-      }
+      if (ids.length < n) throw new Error(`Only ${ids.length} in stock — cannot take ${n} off.`);
       ok(await this.sb.from('boxes').update({ state: 'missing' }).in('id', ids));
     }
     await this.logEvent('adjust', 'products', product.id, { label, note, delta, hall: hallId });
@@ -348,22 +324,12 @@ export class SupabaseStore {
         if (Number(l.delta) > 0) {
           ok(await this.sb.from('boxes').insert(Array.from({ length: n }, () => ({
             hall_id: lineHall, product_id: p.id, state: 'in_inventory', cost: each,
-            serial: '', received_at: new Date().toISOString(), adjustment_id: head.id,
+            serial: '', received_at: new Date().toISOString(), adjustment_id: head.id, source: 'adjust',
           }))).select('id'));
         } else {
-          // prefer boxes not set aside for a session, same as adjustStock
           const free = ok(await this.sb.from('boxes').select('id')
-            .eq('hall_id', lineHall).eq('product_id', p.id).eq('state', 'in_inventory')
-            .eq('location', 'hall')                       // floor only — see adjustStock
-            .is('session_tag', null).limit(n));
+            .eq('hall_id', lineHall).eq('product_id', p.id).eq('state', 'in_inventory').limit(n));
           const pick = free.map((b) => b.id);
-          if (pick.length < n) {
-            const extra = ok(await this.sb.from('boxes').select('id')
-              .eq('hall_id', lineHall).eq('product_id', p.id).eq('state', 'in_inventory')
-              .eq('location', 'hall')
-              .not('session_tag', 'is', null).limit(n - pick.length));
-            pick.push(...extra.map((b) => b.id));
-          }
           if (pick.length < n) {
             throw new Error(`Only ${pick.length} ${p.name} in stock — cannot take ${n} off`);
           }
@@ -395,324 +361,164 @@ export class SupabaseStore {
       .eq('hall_id', hallId).order('at', { ascending: false }).limit(limit));
   }
 
-  // ---- session use ----
-  //
-  // A session records what the count sheets say was played. Nothing leaves stock
-  // until someone applies it, because the sheet and the shelf disagree often
-  // enough that the gap has to be looked at rather than silently absorbed.
-  async getSessions() {
-    return fetchAll(() => this.sb.from('sessions').select('*')
-      .order('session_date', { ascending: false }).order('part'));
-  }
-  async getSessionPlays(sessionId) {
-    return fetchAll(() => this.sb.from('session_plays').select('*').eq('session_id', sessionId).order('name_raw'));
-  }
-  /** Every play across every session — enough to draw the cards without N queries. */
-  async getAllSessionPlays() {
-    return fetchAll(() => this.sb.from('session_plays').select('*'));
-  }
 
-  /**
-   * Take a session's boxes out of stock.
-   *
-   * in_inventory -> opened -> sold_out, one box at a time, because that is the
-   * lifecycle every other screen already understands and the database enforces it.
-   * Each box is stamped with the session, which is what makes undo exact rather
-   * than a guess at which boxes to put back.
-   *
-   * Short lines STOP the run. If the shelf holds four and the sheet says eight,
-   * nothing moves and the caller is told which games are short and by how much.
-   * Writing the difference off as never-received boxes is still possible, but
-   * only when the caller passes { allowShort: true } — a deliberate answer to a
-   * question, rather than something that happens silently on the way past.
-   */
-  async applySession(sessionId, plays, opts = {}) {
-    const sess = ok(await this.sb.from('sessions').select('*').eq('id', sessionId).single());
-    if (sess.applied_at) throw new Error('That session has already been taken out of stock.');
-    // Historical programmes describe play from before the system held inventory.
-    // The stock they came from was never recorded, so applying one would invent
-    // consumption against today's shelf. The database enforces this too.
-    if (sess.historical) {
-      throw new Error('That session is historical — it is there for run-rate history, '
-        + 'not for stock. Nothing to take off the shelf.');
-    }
-    // applied_at is stamped at the END, so a run that dies partway — a dropped
-    // connection, a closed laptop — leaves boxes consumed and the session still
-    // looking unapplied. Pressing apply again would take a SECOND box off the
-    // shelf for every line that had already gone through. The boxes themselves
-    // are the durable record of that, so ask them, not the flag.
-    const already = ok(await this.sb.from('boxes').select('id').eq('session_id', sessionId).limit(1));
-    if (already.length) {
-      throw new Error('This session was partly applied before and stopped midway. '
-        + 'Undo it first, then apply it again — otherwise the stock gets taken off twice.');
-    }
-    const want = wantedFromPlays(plays);
-    const prods = Object.fromEntries(
-      (ok(await this.sb.from('products').select('*').in('id', Object.keys(want).length ? Object.keys(want) : ['-'])))
-        .map((p) => [p.id, p]));
-
-    // COUNT FIRST, MOVE SECOND. The old loop consumed each game as it went and
-    // only discovered a shortfall when it reached one, so a session that was
-    // short on its last game had already taken every earlier game off the shelf.
-    // Nothing is written until every line is known to be satisfiable.
-    const pools = {};
-    const short = [];
-    for (const [pid, n] of Object.entries(want)) {
-      // Boxes opened on the floor during play are exactly the ones the count sheet
-      // is reporting, so take those FIRST. Looking only at in_inventory destroyed
-      // untouched shelf stock, invented a shortfall for boxes that were right
-      // there, and left the real ones stuck open forever.
-      const pool = ok(await this.sb.from('boxes').select('id,state')
-        .eq('hall_id', sess.hall_id).eq('product_id', pid)
-        .in('state', ['opened', 'in_inventory'])
-        // ON THE FLOOR ONLY. A session cannot play a box a distributor is still
-        // holding, and letting it try would turn owned-but-elsewhere stock into
-        // phantom consumption — the shortfall would vanish and the off-site
-        // count would silently drain.
-        .eq('location', 'hall')
-        .is('session_id', null)
-        .order('state', { ascending: true })            // 'in_inventory' < 'opened' alphabetically…
-        .order('received_at', { nullsFirst: true })
-        .limit(n * 2));
-      pools[pid] = consumeOrder(pool, n);               // …so re-order explicitly: opened first
-      if (pools[pid].length < n) {
-        short.push({ product_id: pid, wanted: n, found: pools[pid].length, invented: n - pools[pid].length });
-      }
-    }
-    if (short.length && !opts.allowShort) {
-      throw new ShortfallError(short,
-        Object.fromEntries(Object.values(prods).map((p) => [p.id, p.name])));
-    }
-
-    let moved = 0, invented = 0;
-    for (const [pid, n] of Object.entries(want)) {
-      const ordered = pools[pid];
-      for (const b of ordered) {
-        if (b.state === 'in_inventory') {
-          ok(await this.sb.from('boxes').update({ state: 'opened', session_id: sessionId,
-            opened_session: `${sess.session_date}${sess.part ? ' ' + sess.part : ''}` }).eq('id', b.id));
-        } else {
-          ok(await this.sb.from('boxes').update({ session_id: sessionId }).eq('id', b.id));
-        }
-        ok(await this.sb.from('boxes').update({ state: 'sold_out' }).eq('id', b.id));
-        moved++;
-      }
-      // The caller has accepted the shortfall. Record the difference as
-      // never-received boxes so the ledger still balances and the gap stays
-      // countable — but it is now an accepted write-off, not a silent one.
-      const gap = n - ordered.length;
-      if (gap > 0) {
-        const each = writeOffCost(prods[pid]);
-        const now = new Date().toISOString();
-        ok(await this.sb.from('boxes').insert(Array.from({ length: gap }, () => ({
-          hall_id: sess.hall_id, product_id: pid, state: 'sold_out', unrecorded: true,
-          session_id: sessionId, cost: each,
-          opened_session: `${sess.session_date}${sess.part ? ' ' + sess.part : ''}`,
-          opened_at: now, sold_out_at: now,
-        }))));
-        invented += gap;
-      }
-    }
-    const applied = ok(await this.sb.from('sessions')
-      .update({ applied_at: new Date().toISOString() }).eq('id', sessionId).select().single());
-    await this.logEvent('session.apply', 'sessions', sessionId, {
-      label: `${sess.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — ${sess.session_date}` +
-             `${sess.part ? ' ' + sess.part : ''}: ${moved + invented} box(es) played` +
-             (invented ? `, ${invented} of them never received into stock` : ''),
-      moved, invented, short: short.length, hall: sess.hall_id,
-    });
-    // A write-off gets its own line on the history. The apply event alone buried
-    // it in a subclause nobody reads, which is how 79 boxes went unnoticed.
-    if (invented > 0) {
-      await this.logEvent('session.short', 'sessions', sessionId, {
-        label: `${sess.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — ${sess.session_date}`
-             + `${sess.part ? ' ' + sess.part : ''}: ${invented} box(es) played that were never `
-             + `received into stock (${short.map((s) => (prods[s.product_id]?.name || s.product_id)
-                 + ' ×' + s.invented).join(', ')})`,
-        invented, hall: sess.hall_id,
-        games: short.map((s) => ({ ...s, name: prods[s.product_id]?.name || s.product_id })),
-      });
-    }
-    return { session: applied, moved, invented, short };
-  }
-
-  /** Put a session's boxes back. Exact, because each carries the session's id. */
-  async undoSession(sessionId) {
-    const sess = ok(await this.sb.from('sessions').select('*').eq('id', sessionId).single());
-    const boxes = await fetchAll(() => this.sb.from('boxes').select('id,state,unrecorded').eq('session_id', sessionId));
-    const real = boxes.filter((b) => !b.unrecorded);
-    const ghosts = boxes.filter((b) => b.unrecorded);
-    for (const b of real) {
-      if (b.state === 'sold_out') ok(await this.sb.from('boxes').update({ state: 'opened' }).eq('id', b.id));
-      ok(await this.sb.from('boxes').update({
-        state: 'in_inventory', session_id: null, opened_session: null,
-        opened_at: null, sold_out_at: null,
-      }).eq('id', b.id));
-    }
-    // boxes that were never on a shelf don't go back on one
-    if (ghosts.length) ok(await this.sb.from('boxes').delete().in('id', ghosts.map((b) => b.id)));
-    const restored = ok(await this.sb.from('sessions')
-      .update({ applied_at: null }).eq('id', sessionId).select().single());
-    await this.logEvent('session.undo', 'sessions', sessionId, {
-      label: `${sess.hall_id === 'sc' ? 'Santa Clara' : 'Redwood City'} — ${sess.session_date}` +
-             `${sess.part ? ' ' + sess.part : ''}: ${real.length} box(es) put back` +
-             (ghosts.length ? `, ${ghosts.length} never-received removed` : ''),
-      restored: real.length, removed: ghosts.length,
-    });
-    return { session: restored, restored: real.length, removed: ghosts.length };
-  }
-
-  /**
-   * Point a session line at a different product — or at one for the first time.
-   *
-   * The name the programs use is recorded on the product as an alias, so the
-   * match is made once and never again. Three games on the 10 Aug programme had
-   * to be matched by hand — "Boop-Oop A-Doop" against a catalog reading BOOPOOP
-   * ADOOP, "Dabbing Derby" against Dabbin' Derby, "Triple 500" against a catalog
-   * typo of Tirple 500 — and every one of them would have come back next month.
-   * The person at the desk already did the thinking; this keeps it.
-   */
-  async setPlayProduct(playId, productId) {
-    const play = ok(await this.sb.from('session_plays')
-      .update({ product_id: productId, match_how: 'confirmed', match_score: 1 })
-      .eq('id', playId).select().single());
-    await this.learnAlias(productId, play.name_raw);
-    return play;
-  }
-
-  /** Remember a name a product is known by. No-op if it already matches. */
-  async learnAlias(productId, raw) {
-    const name = String(raw || '').trim();
-    if (!name || !productId) return;
-    const p = ok(await this.sb.from('products').select('name,aliases').eq('id', productId).single());
-    const key = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const known = [p.name, ...(p.aliases || [])].map(key);
-    if (known.includes(key(name))) return;
-    // cap it: a runaway import must not grow one row without bound
-    const next = [...(p.aliases || []), name].slice(-12);
-    ok(await this.sb.from('products').update({ aliases: next }).eq('id', productId).select().single());
-  }
-
-  // ---- session assignments (what's racked for a session, decided ahead) ----
-  //
-  // A plan, not consumption. Assigning sets nothing in motion in the stock ledger;
-  // what was actually played arrives later on the count sheet. The two disagree
-  // often enough that conflating them would lose information.
-  async getAssignments(hallId) {
-    const rows = await fetchAll(() => this.sb
-      .from('session_assignments')
-      .select('id, session_id, product_id, sessions!inner(hall_id)')
-      .eq('sessions.hall_id', hallId));
-    return rows.map(({ sessions, ...r }) => r);
-  }
-
-  /** Find the session for a hall/date/part, creating it if this is the first time. */
-  async ensureSession({ hallId, date, part = '' }) {
-    const found = ok(await this.sb.from('sessions').select('*')
-      .eq('hall_id', hallId).eq('session_date', date).eq('part', part));
-    if (found.length) return found[0];
-    const [y, m, d] = date.split('-').map(Number);
-    const weekday = new Date(y, m - 1, d, 12).toLocaleDateString('en-US', { weekday: 'long' });
-    return ok(await this.sb.from('sessions')
-      .insert({ hall_id: hallId, session_date: date, part, weekday })
-      .select().single());
-  }
-
-  /** Set a session's assigned games to exactly this list. */
-  async setAssignments(sessionId, productIds) {
-    const want = [...new Set(productIds)];
-    const have = await fetchAll(() => this.sb.from('session_assignments')
-      .select('id, product_id').eq('session_id', sessionId));
-    const drop = have.filter((r) => !want.includes(r.product_id)).map((r) => r.id);
-    const add = want.filter((pid) => !have.some((r) => r.product_id === pid));
-    if (drop.length) ok(await this.sb.from('session_assignments').delete().in('id', drop));
-    if (add.length) {
-      ok(await this.sb.from('session_assignments')
-        .insert(add.map((pid) => ({ session_id: sessionId, product_id: pid }))));
-    }
-    await this.logEvent('session.assign', 'sessions', sessionId, {
-      label: `Assigned ${want.length} flash game(s) to a session`,
-      added: add.length, removed: drop.length, total: want.length,
-    });
-    return { total: want.length, added: add.length, removed: drop.length };
-  }
-
-  // ---- deliveries ----
-  //
-  // Stock arriving, recorded on its own terms. Where it matches a PO we issued,
-  // the boxes that PO already put on order are the ones received — creating new
-  // ones would double the count. Anything beyond what the PO expected, or arriving
-  // with no PO of ours at all, becomes new stock.
-  async getDeliveries(hallId) {
-    return fetchAll(() => this.sb.from('deliveries').select('*').eq('hall_id', hallId)
-      .order('received_at', { ascending: false }));
-  }
-
-  /**
-   * Every time stock turned up, from either write path.
-   *
-   * Receiving a PO writes a SHIPMENT; "Add delivery", for a drop with no PO of
-   * ours, writes a DELIVERY. Same event, two tables, and anything reading only
-   * one is wrong for half the hall — Redwood City receives through the PO flow
-   * and its "recently received" list sat empty with 145 boxes on the shelf.
-   */
+  // ---- arrivals: every delivery received, newest first ----
   async getArrivals(hallId, limit = 60) {
-    return ok(await this.sb.from('stock_arrivals').select('*')
-      .eq('hall_id', hallId).order('received_ts', { ascending: false }).limit(limit));
+    const ships = ok(await this.sb.from('shipments')
+      .select('id,po_id,invoice_no,received_on,received_at,confirmed, purchase_orders(num,vendor_id)')
+      .eq('hall_id', hallId).order('received_at', { ascending: false }).limit(limit));
+    if (!ships.length) return [];
+    const counts = {};
+    const boxes = await fetchAll(() => this.sb.from('boxes').select('shipment_id')
+      .in('shipment_id', ships.map((s) => s.id)));
+    for (const b of boxes) counts[b.shipment_id] = (counts[b.shipment_id] || 0) + 1;
+    return ships.map((s) => ({
+      id: s.id, hall_id: hallId, received_at: s.received_on || String(s.received_at).slice(0, 10),
+      received_ts: s.received_at, vendor_id: s.purchase_orders?.vendor_id || null,
+      po_id: s.po_id, po_ref: s.purchase_orders?.num || null, invoice_no: s.invoice_no || null,
+      confirmed: !!s.confirmed, boxes: counts[s.id] || 0,
+    }));
   }
 
-  async addDelivery({ hallId, vendorId, receivedAt, poId = null, poRef = '', invoiceNo = '', note = '', lines }) {
-    const del = ok(await this.sb.from('deliveries').insert({
-      hall_id: hallId, vendor_id: vendorId, received_at: receivedAt,
-      po_id: poId, po_ref: poRef || null, invoice_no: invoiceNo || null, note: note || null,
-    }).select().single());
+  // ---- BC box actions ----
+  //
+  // Every action writes the moment it happens: a scan on Receive puts the box in
+  // stock, a scan on Open puts it on the floor. Nothing waits for a confirm button,
+  // because the floor record IS the compliance record. The database trigger
+  // (guard_box_state) rejects illegal moves and stamps opened_at / sold_out_at /
+  // closed_at, so the time recorded is the server's, not the PC's clock.
 
-    const ids = lines.map((l) => l.product_id);
-    const prods = Object.fromEntries(
-      (ok(await this.sb.from('products').select('*').in('id', ids.length ? ids : ['-'])))
-        .map((p) => [p.id, p]));
+  async _box(id) { return ok(await this.sb.from('boxes').select('*').eq('id', id).single()); }
+  async _name(box) {
+    const p = (ok(await this.sb.from('products').select('name').eq('id', box.product_id).limit(1)))[0];
+    return `${p?.name || box.product_id}${box.serial ? ' #' + box.serial : ''}`;
+  }
 
-    let claimed = 0, created = 0;
-    for (const l of lines) {
-      const n = Math.max(0, parseInt(l.qty) || 0);
-      if (!n) continue;
-      let left = n;
-      if (poId) {
-        const pool = ok(await this.sb.from('boxes').select('id')
-          .eq('po_id', poId).eq('product_id', l.product_id).eq('state', 'on_order').limit(left));
-        for (const b of pool) {
-          ok(await this.sb.from('boxes').update({
-            state: 'in_inventory', delivery_id: del.id, received_at: receivedAt,
-          }).eq('id', b.id));
-          claimed++; left--;
-        }
-      }
-      if (left > 0) {
-        const p = prods[l.product_id] || {};
-        const each = Math.round(((Number(p.base_cost) || 0) * Math.max(1, p.pack_units || 1)
-          / Math.max(1, p.split_boxes || 1)) * 100) / 100;
-        ok(await this.sb.from('boxes').insert(Array.from({ length: left }, () => ({
-          hall_id: hallId, product_id: l.product_id, state: 'in_inventory',
-          delivery_id: del.id, po_id: poId, cost: each,
-          price_tbd: !(each > 0), received_at: receivedAt,
-        }))));
-        created += left;
-      }
-    }
-
-    // a PO with nothing left on order has arrived in full
+  /** Receive one scanned box: claim a PO placeholder for this game, or create a box. */
+  async receiveBox({ hallId, shipmentId = null, poId = null, product, serial, receivedOn }) {
+    const s = String(serial).trim();
+    const dup = ok(await this.sb.from('boxes').select('id').eq('product_id', product.id)
+      .eq('serial', s).neq('state', 'on_order').limit(1));
+    if (dup.length) throw new Error(`${product.name} #${s} was already received.`);
+    const when = receivedOn ? atLocalNoonIso(receivedOn, true) : new Date().toISOString();
+    const fields = {
+      serial: s, shipment_id: shipmentId, received_on: receivedOn || localYmd(),
+      received_at: when, game_snapshot: gameSnapshot(product),
+    };
+    let box = null;
     if (poId) {
-      const remaining = ok(await this.sb.from('boxes').select('id').eq('po_id', poId).eq('state', 'on_order').limit(1));
-      await this.setPoStatus(poId, remaining.length ? 'partial' : 'closed');
+      const ph = ok(await this.sb.from('boxes').select('id').eq('po_id', poId)
+        .eq('product_id', product.id).eq('state', 'on_order').order('id').limit(1));
+      if (ph.length) {
+        box = ok(await this.sb.from('boxes').update({ ...fields, state: 'in_inventory' })
+          .eq('id', ph[0].id).eq('state', 'on_order').select().single());
+      }
     }
-
-    await this.logEvent('delivery.add', 'deliveries', del.id, {
-      label: `${hallId === 'sc' ? 'Santa Clara' : 'Redwood City'} — delivery from ${vendorId} on ${receivedAt}: ` +
-             `${claimed + created} box(es)` + (poRef ? ` (${poRef})` : ''),
-      claimed, created, po_id: poId, po_ref: poRef,
+    if (!box) {
+      box = ok(await this.sb.from('boxes').insert({
+        hall_id: hallId, product_id: product.id, po_id: poId, source: 'receive',
+        cost: Number(product.cost) || 0, price_tbd: !(Number(product.cost) > 0),
+        state: 'in_inventory', ...fields,
+      }).select().single());
+    }
+    await this.logEvent('box.receive', 'boxes', box.id, {
+      label: `Received ${product.name} #${s}`, product: product.id, serial: s, shipment_id: shipmentId,
     });
-    return { delivery: del, claimed, created, total: claimed + created };
+    return box;
   }
+
+  /** Undo a receive: a claimed placeholder goes back on order, a created box is removed. */
+  async undoReceiveBox(boxId) {
+    const b = await this._box(boxId);
+    if (b.state !== 'in_inventory') throw new Error('That box has already moved on — it can\'t be un-received.');
+    if (b.source === 'po') {
+      ok(await this.sb.from('boxes').update({
+        state: 'on_order', serial: '', shipment_id: null, received_at: null, received_on: null, game_snapshot: null,
+      }).eq('id', boxId));
+    } else {
+      ok(await this.sb.from('boxes').delete().eq('id', boxId));
+    }
+    await this.logEvent('box.unreceive', 'boxes', boxId, { label: 'Receive undone' });
+  }
+
+  async openBox(boxId, { openedOn } = {}) {
+    const box = ok(await this.sb.from('boxes').update({ state: 'opened', opened_on: openedOn || localYmd() })
+      .eq('id', boxId).select().single());
+    await this.logEvent('box.open', 'boxes', boxId, { label: `Opened ${await this._name(box)}`, opened_on: box.opened_on });
+    return box;
+  }
+  async undoOpen(boxId) {
+    const box = ok(await this.sb.from('boxes').update({ state: 'in_inventory', opened_at: null, opened_on: null })
+      .eq('id', boxId).select().single());
+    await this.logEvent('box.unopen', 'boxes', boxId, { label: `Open undone — ${await this._name(box)}` });
+  }
+
+  /** Tickets left at the end of a session. The box stays open; every count is kept. */
+  async recordRemainder(boxId, ticketsLeft, { sessionDate } = {}) {
+    const b = await this._box(boxId);
+    if (b.state !== 'opened') throw new Error('Only an open box can have a remainder.');
+    const prods = ok(await this.sb.from('products').select('*').eq('id', b.product_id));
+    const n = checkCount(ticketsLeft, b, prods);
+    const row = ok(await this.sb.from('box_counts').insert({
+      box_id: boxId, hall_id: b.hall_id, tickets_left: n, kind: 'remainder',
+      session_date: sessionDate || localYmd(),
+    }).select().single());
+    ok(await this.sb.from('boxes').update({ tickets_remaining: n }).eq('id', boxId));
+    await this.logEvent('box.remainder', 'boxes', boxId, { label: `Remainder ${n} tickets — ${await this._name(b)}`, tickets_left: n });
+    return row;
+  }
+  async undoRemainder(countId) {
+    const row = ok(await this.sb.from('box_counts').select('*').eq('id', countId).maybeSingle());
+    if (!row) return;
+    ok(await this.sb.from('box_counts').delete().eq('id', countId));
+    const prev = ok(await this.sb.from('box_counts').select('tickets_left').eq('box_id', row.box_id)
+      .order('counted_at', { ascending: false }).limit(1));
+    ok(await this.sb.from('boxes').update({ tickets_remaining: prev[0]?.tickets_left ?? null }).eq('id', row.box_id));
+  }
+
+  async soldOut(boxId) {
+    const box = ok(await this.sb.from('boxes').update({ state: 'sold_out', tickets_remaining: 0 })
+      .eq('id', boxId).select().single());
+    await this.logEvent('box.soldout', 'boxes', boxId, { label: `Sold out — ${await this._name(box)}` });
+    return box;
+  }
+
+  /** Retire an open box that will not sell out, recording what was left in it. */
+  async closeUnsold(boxId, ticketsLeft, { sessionDate } = {}) {
+    const b = await this._box(boxId);
+    transition(b, 'closed_unsold');                       // readable error before the DB's
+    const prods = ok(await this.sb.from('products').select('*').eq('id', b.product_id));
+    const n = checkCount(ticketsLeft, b, prods);
+    const box = ok(await this.sb.from('boxes').update({ state: 'closed_unsold', tickets_remaining: n })
+      .eq('id', boxId).select().single());
+    ok(await this.sb.from('box_counts').insert({
+      box_id: boxId, hall_id: b.hall_id, tickets_left: n, kind: 'close', session_date: sessionDate || localYmd(),
+    }));
+    await this.logEvent('box.close_unsold', 'boxes', boxId, { label: `Closed unsold, ${n} tickets left — ${await this._name(box)}`, tickets_left: n });
+    return box;
+  }
+
+  /** Undo a sold out or close-unsold: back to open. */
+  async reopenBox(boxId) {
+    const b = await this._box(boxId);
+    if (b.state === 'closed_unsold') {
+      const last = ok(await this.sb.from('box_counts').select('id').eq('box_id', boxId).eq('kind', 'close')
+        .order('counted_at', { ascending: false }).limit(1));
+      if (last.length) ok(await this.sb.from('box_counts').delete().eq('id', last[0].id));
+    }
+    const prev = ok(await this.sb.from('box_counts').select('tickets_left').eq('box_id', boxId)
+      .order('counted_at', { ascending: false }).limit(1));
+    const box = ok(await this.sb.from('boxes').update({
+      state: 'opened', sold_out_at: null, closed_at: null, tickets_remaining: prev[0]?.tickets_left ?? null,
+    }).eq('id', boxId).select().single());
+    await this.logEvent('box.reopen', 'boxes', boxId, { label: `Reopened — ${await this._name(box)}` });
+    return box;
+  }
+
+  async getBoxCounts(hallId) {
+    return fetchAll(() => this.sb.from('box_counts').select('*').eq('hall_id', hallId).order('counted_at'));
+  }
+
 
   // ---- receiving ----
   async createShipment(s) { return ok(await this.sb.from('shipments').insert(s).select().single()); }
@@ -726,12 +532,14 @@ export class SupabaseStore {
    * here because the boxes themselves are the record — see getReceiptDetail.
    */
   async confirmShipment(id, summary = {}) {
-    const row = ok(await this.sb.from('shipments').update({ confirmed: true }).eq('id', id).select().single());
+    const patch = { confirmed: true };
+    if (summary.invoice_no) patch.invoice_no = summary.invoice_no;
+    const row = ok(await this.sb.from('shipments').update(patch).eq('id', id).select().single());
     const po = row.po_id
       ? ok(await this.sb.from('purchase_orders').select('num,hall_id,vendor_id').eq('id', row.po_id).single())
       : null;
     await this.logEvent('shipment.receive', 'shipments', id, {
-      label: `${po?.num || 'delivery'} received`
+      label: `${po?.num || 'Delivery'} received`
         + (summary.invoice_no ? ` — invoice ${summary.invoice_no}` : '')
         + (summary.boxes != null ? ` — ${summary.boxes} box(es)` : '')
         + (summary.missing ? `, ${summary.missing} short` : ''),
@@ -752,7 +560,7 @@ export class SupabaseStore {
    */
   async getReceiptDetail(shipmentId) {
     const rows = await fetchAll(() => this.sb.from('boxes')
-      .select('id,product_id,cost,state,serial,po_id,location').eq('shipment_id', shipmentId));
+      .select('id,product_id,cost,state,serial,po_id').eq('shipment_id', shipmentId));
     if (!rows.length) return [];
     const ids = [...new Set(rows.map((b) => b.product_id).filter(Boolean))];
     const prods = Object.fromEntries((ok(await this.sb.from('products').select('id,name').in('id', ids)))
@@ -761,10 +569,9 @@ export class SupabaseStore {
     for (const b of rows) {
       const g = (byProduct[b.product_id] ||= {
         product_id: b.product_id, name: prods[b.product_id] || b.product_id,
-        boxes: 0, value: 0, serials: [], states: {}, offNow: 0,
+        boxes: 0, value: 0, serials: [], states: {},
       });
       g.boxes += 1;
-      if ((b.location || 'hall') !== 'hall') g.offNow += 1;
       g.value = round2(g.value + (Number(b.cost) || 0));
       if (b.serial) g.serials.push(b.serial);
       g.states[b.state] = (g.states[b.state] || 0) + 1;
@@ -772,7 +579,7 @@ export class SupabaseStore {
     return Object.values(byProduct).sort((a, b) => a.name.localeCompare(b.name));
   }
   async getShipments(hallId) {
-    return ok(await this.sb.from('shipments').select('*, purchase_orders!inner(hall_id)').eq('purchase_orders.hall_id', hallId));
+    return fetchAll(() => this.sb.from('shipments').select('*').eq('hall_id', hallId));
   }
   async uploadInvoicePhoto(file) {
     const path = `invoices/${Date.now()}_${file.name.replace(/[^\w.\-]/g, '_')}`;
@@ -783,154 +590,6 @@ export class SupabaseStore {
   getPhotoUrl(path) {
     const { data } = this.sb.storage.from('invoices').getPublicUrl(path);
     return data.publicUrl;
-  }
-
-  // ---- location: where stock physically is ----
-
-  /**
-   * Move boxes between the floor, a distributor's warehouse and off-site storage.
-   *
-   * A move is NOT a state change — a box in_inventory stays in_inventory whether
-   * it is on the shelf or in a storage unit. Only `location` moves, which is why
-   * the state guard never sees this and cannot object.
-   *
-   * Boxes are chosen oldest-received first, the same order a session consumes
-   * them, so shipping "four Lucky Kat" takes the four that have been sitting
-   * longest rather than an arbitrary four.
-   */
-  async moveBoxes({ hallId, productId, from, to, qty, ref = null, fromRef, ids = null,
-                    states = ['in_inventory', 'opened'], note = '' }) {
-    if (from === to) throw new Error('That stock is already there.');
-    if (!['hall', 'vendor', 'storage'].includes(to)) throw new Error(`Unknown location "${to}".`);
-    const n = Math.max(0, parseInt(qty) || 0);
-    if (!n) throw new Error('How many boxes?');
-    // `ids` is how the UI should call this. The Owned screen groups rows by
-    // product AND location_ref, so "ship the Marathon row" has to move Marathon's
-    // boxes; selecting on product+location alone moved whichever ref happened to
-    // sort first and marked the wrong distributor's stock as arrived.
-    let pool;
-    if (ids?.length) {
-      // filter FIRST, then take n — slicing the caller's id list first meant a
-      // single box already moved by someone else turned a valid request into
-      // "only 1 box is there", and the demo store disagreed about which pair moved
-      pool = (ok(await this.sb.from('boxes').select('id')
-        .in('id', ids).eq('location', from)
-        .in('state', states).is('session_id', null))).slice(0, n);
-    } else {
-      let q = this.sb.from('boxes').select('id')
-        .eq('hall_id', hallId).eq('product_id', productId)
-        .eq('location', from)
-        .in('state', states)
-        .is('session_id', null)
-        // boxes racked for a session are spoken for — don't ship them out from
-        // under Assign
-        .is('session_tag', null);
-      if (fromRef !== undefined) {
-        q = fromRef === null ? q.is('location_ref', null) : q.eq('location_ref', fromRef);
-      }
-      pool = ok(await q.order('received_at', { nullsFirst: true }).order('id').limit(n));
-    }
-    if (pool.length < n) {
-      throw new Error(`Only ${pool.length} box(es) of that are ${from === 'hall' ? 'on the floor' : 'at ' + from}, `
-        + `so ${n} cannot move.`);
-    }
-    const picked = pool.map((b) => b.id);
-    // look the name up BEFORE the write: doing it after meant a lookup failure
-    // reported "could not move" when the boxes had already moved, and the user
-    // would ship them twice
-    const prod = (ok(await this.sb.from('products').select('name').eq('id', productId).limit(1)))[0];
-    ok(await this.sb.from('boxes').update({
-      location: to, location_ref: to === 'hall' ? null : (ref || null),
-      // ANY move means someone physically handled every box, so it is a sighting
-      // wherever it lands. Blanking this on the way out made freshly-stored stock
-      // appear instantly in the "not confirmed in 60 days" banner, which trains
-      // people to ignore the banner.
-      counted_at: new Date().toISOString().slice(0, 10),
-    }).in('id', picked));
-    await this.logEvent('stock.move', 'boxes', picked[0], {
-      label: `${prod?.name || productId} — ${n} box(es) moved ${from} → ${to}`
-           + (ref ? ` (${ref})` : ''),
-      hall: hallId, product_id: productId, from, to, qty: n, ref, note, box_ids: picked,
-    });
-    return { moved: n, ids: picked };
-  }
-
-  /** Everything this hall owns that is not on its floor, newest confirmation first. */
-  async getOffsite(hallId) {
-    const rows = await fetchAll(() => this.sb.from('boxes')
-      .select('id,product_id,cost,state,location,location_ref,counted_at,received_at')
-      .eq('hall_id', hallId).neq('location', 'hall')
-      .in('state', ['in_inventory', 'opened']));
-    if (!rows.length) return [];
-    const ids = [...new Set(rows.map((b) => b.product_id).filter(Boolean))];
-    const prods = Object.fromEntries((ok(await this.sb.from('products').select('id,name').in('id', ids)))
-      .map((p) => [p.id, p.name]));
-    const grouped = {};
-    for (const b of rows) {
-      const key = `${b.product_id}|${b.location}|${b.location_ref || ''}`;
-      const g = (grouped[key] ||= {
-        product_id: b.product_id, name: prods[b.product_id] || b.product_id,
-        location: b.location, location_ref: b.location_ref,
-        boxes: 0, value: 0, counted_at: b.counted_at, ids: [],
-      });
-      g.boxes += 1;
-      g.value = round2(g.value + (Number(b.cost) || 0));
-      g.ids.push(b.id);
-      // the group is only as fresh as its stalest box
-      if (!b.counted_at || (g.counted_at && b.counted_at < g.counted_at)) g.counted_at = b.counted_at;
-    }
-    return Object.values(grouped).sort((a, b) =>
-      a.name.localeCompare(b.name) || a.location.localeCompare(b.location));
-  }
-
-  /** Someone laid eyes on it. Records the date so staleness means something. */
-  async confirmOffsite(ids, on = new Date().toISOString().slice(0, 10)) {
-    if (!ids?.length) return { confirmed: 0 };
-    ok(await this.sb.from('boxes').update({ counted_at: on }).in('id', ids));
-    await this.logEvent('stock.confirm', 'boxes', ids[0], {
-      label: `${ids.length} off-site box(es) confirmed present`, qty: ids.length, on,
-    });
-    return { confirmed: ids.length };
-  }
-
-  // ---- hidden games: a hall's private view of a shared catalogue ----
-
-  /** Product ids this hall does not want to see. Display only — never a stock filter. */
-  async getHidden(hallId) {
-    const rows = await fetchAll(() => this.sb.from('hidden_products')
-      .select('product_id,hidden_at,note').eq('hall_id', hallId));
-    return rows.map((r) => r.product_id);
-  }
-
-  /**
-   * Hide or unhide one game at one hall.
-   *
-   * Deliberately upsert/delete rather than a toggle: two managers on the same
-   * screen pressing Hide would otherwise flip it back to visible, and a toggle
-   * would also mean the caller has to already know the current state to be right.
-   */
-  async setHidden(hallId, productId, hide, note = null) {
-    if (!hallId || !productId) throw new Error('setHidden needs a hall and a product');
-    // read the name BEFORE writing — a lookup that fails after the commit reports
-    // failure for work that actually happened
-    const prod = ok(await this.sb.from('products').select('id,name').eq('id', productId).maybeSingle());
-    if (!prod) throw new Error(`No such game: ${productId}`);
-    if (hide) {
-      // note is only written when one is supplied — the UI passes null, and an
-      // upsert carrying it would wipe a reason someone typed earlier
-      const row = { hall_id: hallId, product_id: productId };
-      if (note != null) row.note = note;
-      ok(await this.sb.from('hidden_products')
-        .upsert(row, { onConflict: 'hall_id,product_id' }));
-    } else {
-      ok(await this.sb.from('hidden_products').delete()
-        .eq('hall_id', hallId).eq('product_id', productId));
-    }
-    await this.logEvent(hide ? 'catalog.hide' : 'catalog.unhide', 'products', productId, {
-      label: `${prod.name} ${hide ? 'hidden at' : 'shown again at'} ${hallId.toUpperCase()}`,
-      hall: hallId, product_id: productId, note,
-    });
-    return { product_id: productId, hidden: !!hide };
   }
 
   // ---- payments ----

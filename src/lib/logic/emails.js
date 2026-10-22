@@ -31,7 +31,7 @@ function signature(sender = {}, hallName) {
   const out = ['', 'Thanks,', (sender.name || '').trim() || 'The inventory team'];
   const orgLine = [sender.title, sender.org].filter(Boolean).join(', ');
   if (orgLine) out.push(orgLine);
-  if (hallName) out.push(hallName);
+  if (hallName && hallName !== (sender.org || '').trim()) out.push(hallName);   // never sign twice
   if (sender.phone) out.push(sender.phone);
   return out;
 }

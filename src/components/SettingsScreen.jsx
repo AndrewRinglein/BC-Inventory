@@ -25,7 +25,8 @@ export default function SettingsScreen() {
   const [pin, setPin] = useState('');
   const [vend, setVend] = useState(null);
   const [sender, setSender] = useState(null);
-  const [senderHall, setSenderHall] = useState('sc');
+  const senderHall = 'bc';
+  const [report, setReport] = useState(null);       // compliance report header
   const [addrHall, setAddrHall] = useState(null);   // which hall's per-vendor list is open
   const [poText, setPoText] = useState(null);       // wording overrides for the PO email
 
@@ -35,25 +36,25 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     setEmail(settings.email || { testMode: true, testAddress: '', fromAddress: '', accountingAddress: '' });
-    setHalls(settings.halls_config || { sc: { address: '' }, rwc: { address: '' } });
+    setHalls(settings.halls_config || { bc: { address: '' } });
+    setReport({ businessName: '', license: '', ...(settings.report || {}) });
     setVend(Object.fromEntries(vendors.map((v) => [v.id, { email: v.email || '', contact_name: v.contact_name || '' }])));
     const raw = settings.sender || {};
     const blank = { name: '', org: '', title: '', phone: '', replyTo: '' };
-    // normalise the legacy flat shape into per-hall entries
-    setSender((raw.name || raw.org)
-      ? { sc: { ...blank, ...raw }, rwc: { ...blank, ...raw } }
-      : { sc: { ...blank, ...(raw.sc || {}) }, rwc: { ...blank, ...(raw.rwc || {}) } });
+    // one location: accept the flat shape too
+    setSender({ bc: { ...blank, ...((raw.name || raw.org) ? raw : (raw.bc || {})) } });
     setPoText({ subject: '', intro: '', tbdNote: '', note: '', closing: '', ...(settings.po_email || {}) });
   }, [settings, vendors]);
 
   if (!unlocked) return <div className="card pad dimmer">Settings are PIN-protected.</div>;
-  if (!email || !halls || !vend || !sender || !poText) return null;
+  if (!email || !halls || !vend || !sender || !poText || !report) return null;
 
   const save = async () => {
     await store.setSetting('email', email);
     await store.setSetting('halls_config', halls);
     await store.setSetting('sender', sender);
     await store.setSetting('po_email', poText);
+    await store.setSetting('report', report);
     for (const v of vendors) {
       const next = vend[v.id];
       if ((v.email || '') !== next.email || (v.contact_name || '') !== next.contact_name) {
@@ -70,7 +71,7 @@ export default function SettingsScreen() {
     const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `bingo-inventory-export-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `bc-inventory-export-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
   };
 
@@ -82,17 +83,13 @@ export default function SettingsScreen() {
           <div className="card pad" style={{ marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <b style={{ fontSize: 13.5 }}>Who the emails come from</b>
-              <div className="hall-switch" style={{ margin: 0, width: 220 }}>
-                <button type="button" className={senderHall === 'sc' ? 'on' : ''} onClick={() => setSenderHall('sc')}>Santa Clara</button>
-                <button type="button" className={senderHall === 'rwc' ? 'on' : ''} onClick={() => setSenderHall('rwc')}>Redwood City</button>
-              </div>
             </div>
             <p className="muted-note" style={{ marginTop: 2, marginBottom: 8 }}>
-              Each hall's orders come from its own person. Vendors see this name in their inbox and in the signature.
+              Distributors see this name in their inbox and in the signature.
             </p>
             <div style={{ display: 'flex', gap: 10 }}>
-              <div style={{ flex: 1 }}><Row label="Name"><input type="text" placeholder="Sagit" value={sender[senderHall].name || ''} onChange={(e) => setSender({ ...sender, [senderHall]: { ...sender[senderHall], name: e.target.value } })} style={{ width: '100%' }} /></Row></div>
-              <div style={{ flex: 1 }}><Row label="Organization"><input type="text" placeholder="Vanguard" value={sender[senderHall].org || ''} onChange={(e) => setSender({ ...sender, [senderHall]: { ...sender[senderHall], org: e.target.value } })} style={{ width: '100%' }} /></Row></div>
+              <div style={{ flex: 1 }}><Row label="Name"><input type="text" placeholder="Your name" value={sender[senderHall].name || ''} onChange={(e) => setSender({ ...sender, [senderHall]: { ...sender[senderHall], name: e.target.value } })} style={{ width: '100%' }} /></Row></div>
+              <div style={{ flex: 1 }}><Row label="Organization"><input type="text" placeholder="BC" value={sender[senderHall].org || ''} onChange={(e) => setSender({ ...sender, [senderHall]: { ...sender[senderHall], org: e.target.value } })} style={{ width: '100%' }} /></Row></div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}><Row label="Title (optional)"><input type="text" value={sender[senderHall].title || ''} onChange={(e) => setSender({ ...sender, [senderHall]: { ...sender[senderHall], title: e.target.value } })} style={{ width: '100%' }} /></Row></div>
@@ -125,7 +122,7 @@ export default function SettingsScreen() {
             </div>
           </div>
           <div className="card pad" style={{ marginBottom: 14 }}>
-            <b style={{ fontSize: 13.5 }}>Vendor PO addresses</b>
+            <b style={{ fontSize: 13.5 }}>Distributor PO addresses</b>
             <div style={{ marginTop: 10 }}>
               {vendors.map((v) => (
                 <div key={v.id} style={{ display: 'flex', gap: 10 }}>
@@ -134,7 +131,7 @@ export default function SettingsScreen() {
                       onChange={(e) => setVend({ ...vend, [v.id]: { ...vend[v.id], email: e.target.value } })} style={{ width: '100%' }} />
                   </Row></div>
                   <div style={{ flex: 1 }}><Row label="Contact first name">
-                    <input type="text" placeholder="Scott" value={vend[v.id].contact_name}
+                    <input type="text" placeholder="first name" value={vend[v.id].contact_name}
                       onChange={(e) => setVend({ ...vend, [v.id]: { ...vend[v.id], contact_name: e.target.value } })} style={{ width: '100%' }} />
                   </Row></div>
                 </div>
@@ -144,13 +141,21 @@ export default function SettingsScreen() {
         </div>
         <div>
           <div className="card pad" style={{ marginBottom: 14 }}>
-            <b style={{ fontSize: 13.5 }}>Halls — delivery addresses</b>
+            <b style={{ fontSize: 13.5 }}>Compliance report header</b>
+            <p className="muted-note" style={{ marginTop: 4, marginBottom: 4 }}>Printed at the top of every report from the Reports screen.</p>
+            <Row label="Business name">
+              <input type="text" placeholder="BC" value={report.businessName} onChange={(e) => setReport({ ...report, businessName: e.target.value })} style={{ width: '100%' }} /></Row>
+            <Row label="License / permit number (optional)">
+              <input type="text" value={report.license} onChange={(e) => setReport({ ...report, license: e.target.value })} style={{ width: '100%' }} /></Row>
+          </div>
+          <div className="card pad" style={{ marginBottom: 14 }}>
+            <b style={{ fontSize: 13.5 }}>Delivery address</b>
             <p className="muted-note" style={{ marginTop: 4, marginBottom: 4 }}>
-              This is the “Please deliver to” block on the PO. Set the hall's usual address, and
-              give a vendor its own only when they drop somewhere else.
+              This is the “Please deliver to” block on the PO. Set the usual address, and give a
+              distributor its own only when they drop somewhere else.
             </p>
             <div style={{ marginTop: 6 }}>
-              {[['sc', 'Santa Clara'], ['rwc', 'Redwood City']].map(([hid, label]) => {
+              {[['bc', 'BC']].map(([hid, label]) => {
                 const over = overriddenVendors(halls, hid, vendors);
                 const open = addrHall === hid;
                 return (

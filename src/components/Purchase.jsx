@@ -1,143 +1,59 @@
 import React, { useContext, useMemo, useState } from 'react';
 import { AppCtx } from '../App.jsx';
-import { fmtMoney, buildDrafts, ticketPrice } from '../lib/logic/po.js';
+import { fmtMoney, buildDrafts } from '../lib/logic/po.js';
 import { countByProduct } from '../lib/logic/boxes.js';
-import { locationShort, shortageAdvice } from '../lib/logic/location.js';
-import { baseCost, packUnits, priceParts, splitBoxes } from '../lib/logic/pricing.js';
-import { GAME_TYPES, MISC_MODES, passesFilters } from '../lib/logic/categories.js';
-import { needsCost, needsType, needsTickets, needsVendor } from '../lib/logic/setup.js';
-import { isHidden } from '../lib/logic/hidden.js';
+import { needsCost, needsTickets, needsVendor } from '../lib/logic/setup.js';
+import { searchMatches } from '../lib/logic/naming.js';
 import UpdateGame from './UpdateGame.jsx';
-import { ProductGroupingToggle, GroupedProductRows } from './ProductGrouping.jsx';
-
-const TIX_FILTERS = [
-  ['', 'All'], ['lt1000', '< 1,000'], ['1to2k', '1,000–1,999'],
-  ['2to3k', '2,000–2,999'], ['3kplus', '3,000 +'], ['none', 'Needs update'],
-];
-const tixMatch = (t, sel) => !sel ? true : sel === 'none' ? !(Number(t) > 0) : !t ? false :
-  sel === 'lt1000' ? t < 1000 : sel === '1to2k' ? t >= 1000 && t < 2000 :
-  sel === '2to3k' ? t >= 2000 && t < 3000 : t >= 3000;
 
 const STOCK_FILTERS = [
-  ['', 'All'], ['out', 'Out of stock'], ['low', 'Low (1–2)'],
-  ['some', 'In stock'], ['onorder', 'On order'], ['nocost', 'Needs cost'],
+  ['', 'All'], ['out', 'Out of stock'], ['low', 'Low (1–2)'], ['some', 'In stock'],
+  ['onorder', 'On order'], ['nocost', 'Needs cost'],
 ];
 const stockMatch = (p, live, onorder, sel) =>
-  !sel ? true :
-  sel === 'out' ? live === 0 :
-  sel === 'low' ? live > 0 && live <= 2 :
-  sel === 'some' ? live > 0 :
-  sel === 'onorder' ? onorder > 0 :
-  needsCost(p);
+  !sel ? true : sel === 'out' ? live === 0 : sel === 'low' ? live > 0 && live <= 2
+    : sel === 'some' ? live > 0 : sel === 'onorder' ? onorder > 0 : needsCost(p);
 
-const sortVal = (p, k, cnt) => {
-  const c = cnt[p.id] || {};
-  switch (k) {
-    case 'tickets': return p.tickets || 0;
-    case 'price': return ticketPrice(p);
-    case 'vendor': return p.vendor_id || '';
-    case 'type': return p.type || '';
-    case 'base': return baseCost(p);
-    case 'units': return packUnits(p);
-    case 'packing': return Number(p.packing_units) || 0;
-    case 'cost': return Number(p.cost) || 0;
-    case 'live': return (c.inv || 0) + (c.open || 0);
-    case 'onorder': return c.onorder || 0;
-    default: return p.name.toLowerCase();
-  }
-};
-
+/**
+ * Purchase — the order builder. Enter how many boxes of each game; Review turns it
+ * into one PO per distributor. A game with no cost yet still orders: the PO shows
+ * "?" and asks the distributor to bill at their price.
+ */
 export default function Purchase() {
-  const { hall, products, vendors, boxes, orderQty, store, reloadHall, setScreen, setToast, can,
-          hidden, toggleHidden } = useContext(AppCtx);
+  const { hall, products, vendors, boxes, orderQty, store, reloadHall, setScreen, can } = useContext(AppCtx);
   const editable = can('order');
   const [vendorF, setVendorF] = useState('');
   const [q, setQ] = useState('');
-  const [groupByType, setGroupByType] = useState(false);
-  const [typeF, setTypeF] = useState('');
-  const [miscF, setMiscF] = useState('games');
-  const [tixF, setTixF] = useState('');
-  const [priceF, setPriceF] = useState('');
   const [stockF, setStockF] = useState('');
   const [sortKey, setSortKey] = useState('name');
   const [dir, setDir] = useState(1);
   const [updPid, setUpdPid] = useState(null);
-  const [showHidden, setShowHidden] = useState(false);
 
   const cnt = useMemo(() => countByProduct(boxes), [boxes]);
   const vmap = useMemo(() => Object.fromEntries(vendors.map((v) => [v.id, v])), [vendors]);
-
-  // use the same builder the PO uses, so packing charges are in the running total
   const drafts = useMemo(() => buildDrafts(orderQty, products, vendors), [orderQty, products, vendors]);
   const grand = drafts.reduce((a, d) => a + d.total, 0);
-  const lineCount = drafts.reduce((a, d) => a + d.lines.filter((l) => l.kind !== 'fee').length, 0);
-  const feeTotal = drafts.reduce((a, d) => a + d.lines.filter((l) => l.kind === 'fee').reduce((x, l) => x + l.qty * l.cost, 0), 0);
-  const tbdOrdered = drafts.reduce((a, d) => a + d.lines.filter((l) => l.price_tbd).length, 0);
+  const boxCount = drafts.reduce((a, d) => a + d.lines.reduce((x, l) => x + l.qty, 0), 0);
+  const tbd = drafts.reduce((a, d) => a + d.lines.filter((l) => l.price_tbd).length, 0);
 
-  const Upd = ({ p }) => (
-    <button className="badge b-gold" style={{ border: 0, cursor: 'pointer', font: 'inherit', fontSize: 11, fontWeight: 600 }}
-      title="Click to fill this in" onClick={() => setUpdPid(p.id)}>update</button>
-  );
-
-  const stockOf = (p) => (cnt[p.id]?.inv || 0) + (cnt[p.id]?.open || 0);
+  const live = (p) => (cnt[p.id]?.inv || 0) + (cnt[p.id]?.open || 0);
+  const sortVal = (p, k) => ({
+    name: p.name.toLowerCase(), form: p.form_number || '', live: live(p), onorder: cnt[p.id]?.onorder || 0,
+    cost: Number(p.cost) || 0, tickets: Number(p.tickets) || 0, vendor: vmap[p.vendor_id]?.name || '',
+  }[k]);
 
   const rows = products
     .filter((p) => p.active !== false)
-    // A game this hall has put away is not orderable here. The order quantity
-    // check below still wins, deliberately: if a line somehow already carries a
-    // quantity, the row has to stay reachable so it can be set back to zero.
-    // Hiding must never strand a number on an order nobody can see.
-    .filter((p) => showHidden || (orderQty[p.id] || 0) > 0 || !isHidden(hidden, p.id))
-    .filter((p) => (orderQty[p.id] || 0) > 0 || (   // anything already on the order always shows
-      (!vendorF || p.vendor_id === vendorF) &&
-      (!q || p.name.toLowerCase().includes(q.toLowerCase())) &&
-      passesFilters(p, { type: typeF, misc: miscF }) &&
-      tixMatch(p.tickets, tixF) &&
-      (!priceF || String(ticketPrice(p)) === priceF) &&
-      stockMatch(p, stockOf(p), cnt[p.id]?.onorder || 0, stockF)
-    ))
+    .filter((p) => (orderQty[p.id] || 0) > 0 || (      // anything already on the order always shows
+      (!vendorF || p.vendor_id === vendorF)
+      && (!q || searchMatches(p, q) || String(p.form_number || '').toLowerCase().includes(q.toLowerCase()))
+      && stockMatch(p, live(p), cnt[p.id]?.onorder || 0, stockF)))
     .sort((a, b) => {
-      const x = sortVal(a, sortKey, cnt), y = sortVal(b, sortKey, cnt);
-      const d = typeof x === 'string' ? x.localeCompare(y) : (x || 0) - (y || 0);
-      return d * dir || a.name.localeCompare(b.name);
+      const x = sortVal(a, sortKey), y = sortVal(b, sortKey);
+      return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir || a.name.localeCompare(b.name);
     });
-
-  // Games this hall has put away. Counted as "not currently on show" rather than
-  // "hidden", because one carrying an order quantity is deliberately still in the
-  // table — saying "1 hidden here" while that one game sits visible on screen is
-  // the sort of small lie that makes people stop trusting the number.
-  const hiddenHere = products.filter((p) => p.active !== false
-    && isHidden(hidden, p.id) && !(orderQty[p.id] || 0)).length;
-
-  const sortBy = (k) => { setGroupByType(false); if (k === sortKey) setDir(-dir); else { setSortKey(k); setDir(1); } };
-  const arrow = (k) => (!groupByType && k === sortKey ? (dir > 0 ? ' ▲' : ' ▼') : '');
-  const anyFilter = !!(vendorF || typeF || tixF || priceF || stockF || q || miscF !== 'games');
-  const clearFilters = () => {
-    setVendorF(''); setTypeF(''); setTixF(''); setPriceF(''); setStockF(''); setQ(''); setMiscF('games');
-  };
-
-  /**
-   * Put a game away for this hall, or bring it back.
-   *
-   * This control exists here as well as on Inventory because Inventory only lists
-   * games that HAVE stock. The games that most need putting away are the ones this
-   * hall has never carried — 173 are stocked only at Santa Clara, 63 only at
-   * Redwood City — and none of those has a row on Inventory to press.
-   *
-   * No confirm dialog here, unlike Inventory: a game with stock on the floor is
-   * exactly the case Inventory handles, and this screen is where you are looking at
-   * catalogue noise. The toast undo covers a misclick either way.
-   */
-  const setHidden = async (p, hide) => {
-    try {
-      await toggleHidden(p.id, hide);
-      setToast(hide ? `${p.name} hidden at ${hall === 'sc' ? 'Santa Clara' : 'Redwood City'}`
-                    : `${p.name} is orderable again`,
-        () => toggleHidden(p.id, !hide));
-    } catch (e) {
-      setToast(e.message || 'Could not change that');
-    }
-  };
+  const sortBy = (k) => { if (k === sortKey) setDir(-dir); else { setSortKey(k); setDir(1); } };
+  const arrow = (k) => (k === sortKey ? (dir > 0 ? ' ▲' : ' ▼') : '');
 
   const setQty = async (pid, v) => {
     const n = Math.max(0, parseInt(v) || 0);
@@ -148,52 +64,24 @@ export default function Purchase() {
   return (
     <div>
       <div className="page-head" style={{ position: 'sticky', top: 0, background: 'var(--bg)', zIndex: 10, paddingTop: 6, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
-        <div className="h1">Purchase — {hall === 'sc' ? 'Santa Clara' : 'Redwood City'}</div>
+        <div className="h1">Purchase</div>
         <div className="grow" />
-        <span className="dim" style={{ fontSize: 13 }}>
-          {lineCount ? `${lineCount} lines` : 'Enter quantities to build an order'}
-          {feeTotal > 0 && <span className="dimmer"> · incl. {fmtMoney(feeTotal)} packing</span>}
-        </span>
-        <span className="mono" style={{ fontWeight: 700, fontSize: 16 }}>
-          {lineCount ? (tbdOrdered ? `${fmtMoney(grand)} +?` : fmtMoney(grand)) : ''}
-        </span>
-        <button className="btn primary" disabled={!lineCount || !editable} onClick={() => setScreen('review')}
-          title={editable ? '' : 'Your role cannot place orders for this hall'}>Review order →</button>
+        <span className="dim" style={{ fontSize: 13 }}>{boxCount ? `${boxCount} box${boxCount === 1 ? '' : 'es'} · ${drafts.length} distributor${drafts.length === 1 ? '' : 's'}` : 'Enter quantities to build an order'}</span>
+        <span className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{boxCount ? (tbd ? `${fmtMoney(grand)} +?` : fmtMoney(grand)) : ''}</span>
+        <button className="btn primary" disabled={!boxCount || !editable} onClick={() => setScreen('review')}>Review order →</button>
       </div>
-      {tbdOrdered > 0 && (
-        <div className="demo-banner" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span>
-            <b>{tbdOrdered} line{tbdOrdered === 1 ? '' : 's'} on this order {tbdOrdered === 1 ? 'has' : 'have'} no price yet.</b>{' '}
-            {tbdOrdered === 1 ? 'It' : 'They'}'ll go out as “?” and the email asks the distributor to send at their list price
-            and put the figure on the invoice. The total below covers the priced lines only.
-          </span>
-          <div style={{ flex: 1 }} />
-          <button className="btn ghost sm" onClick={() => setScreen('games')}>Enter prices instead →</button>
+      {tbd > 0 && (
+        <div className="demo-banner">
+          <b>{tbd} line{tbd === 1 ? '' : 's'} on this order {tbd === 1 ? 'has' : 'have'} no cost yet.</b>{' '}
+          {tbd === 1 ? 'It' : 'They'}'ll go out as “?” and the email asks the distributor to bill at their price. The total covers priced lines only.
         </div>
       )}
       <div className="filter-bar">
-        <ProductGroupingToggle checked={groupByType} onChange={setGroupByType} />
-        <input type="text" placeholder="Search game…" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 190 }} />
-        <label>Vendor
+        <input type="text" placeholder="Search name or form #…" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 210 }} />
+        <label>Distributor
           <select value={vendorF} onChange={(e) => setVendorF(e.target.value)}>
             <option value="">All</option>
             {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-          </select></label>
-        <label>Type
-          <select value={typeF} onChange={(e) => setTypeF(e.target.value)}>
-            {GAME_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-          </select></label>
-        <label>Misc
-          <select value={miscF} onChange={(e) => setMiscF(e.target.value)} title="Cherry tickets and dauber supplies">
-            {MISC_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-          </select></label>
-        <label>Tickets
-          <select value={tixF} onChange={(e) => setTixF(e.target.value)}>
-            {TIX_FILTERS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select></label>
-        <label>$ / ticket
-          <select value={priceF} onChange={(e) => setPriceF(e.target.value)}>
-            <option value="">All</option><option value="1">$1</option><option value="2">$2</option>
           </select></label>
         <label>Stock
           <select value={stockF} onChange={(e) => setStockF(e.target.value)}>
@@ -201,144 +89,48 @@ export default function Purchase() {
           </select></label>
         <div style={{ flex: 1 }} />
         <span className="dimmer" style={{ fontSize: 12 }}>{rows.length} shown</span>
-        {(hiddenHere > 0 || showHidden) && (
-          <button className={'btn sm ' + (showHidden ? 'orange' : 'ghost')} onClick={() => setShowHidden(!showHidden)}
-            title={showHidden
-              ? 'Go back to just the games this hall orders'
-              : 'Games this hall has put away are not orderable here. Show them to bring one back.'}>
-            {showHidden ? 'Hide them again' : `${hiddenHere} hidden here`}
-          </button>
-        )}
-        {anyFilter && <button className="btn ghost sm" onClick={clearFilters}>Clear</button>}
       </div>
-
-      {/* Ship before you buy. The order builder's job is to tell you what you
-          NEED; if you already own it somewhere else the answer is a shipment,
-          not a purchase order, and nothing else in the app will say so. */}
-      {(() => {
-        // UNITS vs BOXES. orderQty is in ORDERED UNITS; cnt.off is in inventory
-        // BOXES. One unit can be a case of 16 totes, so comparing the two
-        // directly told a buyer he already owned two of the two he was ordering
-        // when in fact he owned 16 totes of the 32 he needed — talking him out
-        // of a purchase he genuinely had to make. Everything below is in boxes.
-        const owned = Object.entries(orderQty)
-          .filter(([pid, n]) => n > 0 && (cnt[pid]?.off || 0) > 0)
-          .map(([pid, n]) => {
-            const p = products.find((x) => x.id === pid);
-            const c = cnt[pid] || {};
-            const per = splitBoxes(p);
-            const wantBoxes = n * per;
-            // and a SHORTAGE is what the floor cannot already cover. Feeding the
-            // gross order quantity in told a hall with 50 on the shelf topping up
-            // by 3 that it was "short 3" and should ship rather than buy.
-            const shortBoxes = Math.max(0, wantBoxes - ((c.inv || 0) + (c.open || 0)));
-            return { pid, name: p?.name || pid, units: n, per, wantBoxes, shortBoxes,
-                     off: c.off || 0, offBy: c.offBy || {} };
-          });
-        const relevant = owned.filter((o) => o.shortBoxes > 0);
-        if (!relevant.length) return null;
-        return (
-          <div className="card pad" style={{ marginBottom: 12, background: '#eef7f6', border: '1px solid #9ec9c4' }}>
-            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-              You already own {relevant.reduce((a, o) => a + Math.min(o.shortBoxes, o.off), 0)} box(es) of what you're short
-            </div>
-            {relevant.map((o) => (
-              <div key={o.pid} style={{ fontSize: 12.5, marginTop: 2 }}>
-                <b>{o.name}</b> — ordering {o.units} unit{o.units === 1 ? '' : 's'}
-                {o.per > 1 ? ` (${o.wantBoxes} boxes)` : ''}, and {o.off} already ours
-                ({Object.entries(o.offBy).map(([k, v]) => `${v} ${locationShort(k)}`).join(', ')}).
-                {' '}{shortageAdvice(o.shortBoxes, o.off)}
-              </div>
-            ))}
-          </div>
-        );
-      })()}
-
-      <div className="card" style={{ overflow: 'hidden' }}>
+      <div className="card" style={{ overflow: 'auto' }}>
         <table className="tbl">
           <thead><tr>
             <th className="first sortable" onClick={() => sortBy('name')}>Game{arrow('name')}</th>
-            <th className="r sortable" style={{ width: 84 }} onClick={() => sortBy('live')}
-                title="On the floor at this hall — what can actually be played. Never includes stock held off-site.">Available{arrow('live')}</th>
-            <th style={{ textAlign: 'center', width: 96 }}>Units</th>
-            <th className="r" style={{ width: 118 }}>Line total</th>
-            <th className="r sortable" style={{ width: 92 }} onClick={() => sortBy('tickets')}>Tickets{arrow('tickets')}</th>
-            <th className="r sortable" style={{ width: 74 }} onClick={() => sortBy('price')}>$ / tkt{arrow('price')}</th>
-            <th className="sortable" style={{ width: 150 }} onClick={() => sortBy('vendor')}>Vendor{arrow('vendor')}</th>
-            <th className="sortable" style={{ width: 88 }} onClick={() => sortBy('type')}>Type{arrow('type')}</th>
-            <th className="r sortable" style={{ width: 92 }} onClick={() => sortBy('base')} title="What one deal costs">Base ${arrow('base')}</th>
-            <th className="r sortable" style={{ width: 62 }} onClick={() => sortBy('units')} title="Deals inside one ordered unit — what the base price is quoted against">Deals{arrow('units')}</th>
-            <th className="r sortable" style={{ width: 86 }} onClick={() => sortBy('packing')} title="Packing on one ordered unit">Packing{arrow('packing')}</th>
-            <th className="r sortable" style={{ width: 106 }} onClick={() => sortBy('cost')} title="Base × deals + packing">Unit total{arrow('cost')}</th>
-            <th className="r sortable" style={{ width: 78 }} onClick={() => sortBy('onorder')}>On order{arrow('onorder')}</th>
-            <th className="last" style={{ width: 62 }} />
+            <th className="sortable" onClick={() => sortBy('form')}>Form #{arrow('form')}</th>
+            <th className="r sortable" onClick={() => sortBy('live')} title="Sealed + open">In stock{arrow('live')}</th>
+            <th className="r sortable" onClick={() => sortBy('onorder')}>On order{arrow('onorder')}</th>
+            <th style={{ textAlign: 'center', width: 96 }}>Boxes</th>
+            <th className="r sortable" onClick={() => sortBy('cost')}>Cost / box{arrow('cost')}</th>
+            <th className="r">Line total</th>
+            <th className="r sortable" onClick={() => sortBy('tickets')}>Tickets{arrow('tickets')}</th>
+            <th className="sortable" onClick={() => sortBy('vendor')}>Distributor{arrow('vendor')}</th>
+            <th className="last" style={{ width: 60 }} />
           </tr></thead>
           <tbody>
-            <GroupedProductRows items={rows} enabled={groupByType} columns={14}>{(p) => {
+            {rows.map((p) => {
               const n = orderQty[p.id] || 0;
-              const c = cnt[p.id] || {};
-              const pp = priceParts(p, vmap[p.vendor_id]);
               return (
                 <tr key={p.id} className={n ? 'hl' : ''}>
-                  <td className="first">
-                    {p.name}
-                    {isHidden(hidden, p.id) && (
-                      <span className="badge b-gold" style={{ marginLeft: 6, fontSize: 10.5 }}
-                        title="This game is hidden at this hall but still has a quantity on the order. Set it to 0, or unhide it on Inventory.">
-                        hidden — still on the order
-                      </span>
-                    )}
-                  </td>
-                  <td className="r mono">{(c.inv || 0) + (c.open || 0)}</td>
+                  <td className="first">{p.name}</td>
+                  <td className="mono dim">{p.form_number}</td>
+                  <td className="r mono">{live(p)}</td>
+                  <td className="r mono dimmer">{cnt[p.id]?.onorder || 0}</td>
                   <td style={{ textAlign: 'center' }}>
                     {needsVendor(p)
                       ? <button className="badge b-gold" style={{ border: 0, cursor: 'pointer', font: 'inherit', fontSize: 11, fontWeight: 600 }}
-                          title="We don't know who supplies this yet, so there's nobody to send the order to. Click to set the distributor."
                           onClick={() => setUpdPid(p.id)}>needs distributor</button>
-                      : <>
-                          <input className={'qty' + (needsCost(p) ? ' tbd-qty' : '')} type="number" min="0" value={n || ''} placeholder="" disabled={!editable}
-                            title={needsCost(p) ? "You can order this — the PO will show ? and ask the vendor for their price" : ''}
-                            onChange={(e) => setQty(p.id, e.target.value)} />
-                          {pp.splits && n > 0 && <div className="dimmer" style={{ fontSize: 10.5 }}>= {n * pp.split} boxes</div>}
-                        </>}
+                      : <input className={'qty' + (needsCost(p) ? ' tbd-qty' : '')} type="number" min="0" value={n || ''} disabled={!editable}
+                          onChange={(e) => setQty(p.id, e.target.value)} />}
                   </td>
-                  <td className="r mono">
-                    {n ? (needsCost(p) ? <span className="tbd">?</span> : <>
-                      <b>{fmtMoney(n * pp.allIn)}</b>
-                      {pp.packing > 0 && <div className="dimmer" style={{ fontSize: 10.5 }}>incl. {fmtMoney(n * pp.packing)} packing</div>}
-                    </>) : ''}
-                  </td>
-                  <td className="r mono">{needsTickets(p) ? <Upd p={p} /> : (p.tickets ? p.tickets.toLocaleString() : '—')}</td>
-                  <td className="r mono dim">${ticketPrice(p)}</td>
-                  <td className="dim" style={{ fontSize: 12 }}>
-                    {needsVendor(p) ? <Upd p={p} /> : vmap[p.vendor_id]?.name}
-                  </td>
-                  <td className="dimmer" style={{ fontSize: 12 }}>{needsType(p) ? <Upd p={p} /> : p.type}</td>
-                  <td className="r mono">
-                    {needsCost(p)
-                      ? <button className="tbd" title="No price on our side — the PO goes out with a ? and the vendor fills it in. Click to enter it now."
-                          onClick={() => setUpdPid(p.id)}>?</button>
-                      : fmtMoney(pp.base)}
-                  </td>
-                  <td className="r mono dimmer">{pp.multiplied ? `×${pp.units}` : '—'}</td>
-                  <td className="r mono">{pp.packing > 0 ? fmtMoney(pp.packing) : <span className="dimmer">—</span>}</td>
-                  <td className="r mono">
-                    {needsCost(p) ? <span className="dimmer">—</span> : <b>{fmtMoney(pp.allIn)}</b>}
-                    {pp.splits && <div className="dimmer" style={{ fontSize: 10.5 }}>→ {pp.split} boxes @ {fmtMoney(pp.perBox)}</div>}
-                  </td>
-                  <td className="r mono dimmer">{c.onorder || 0}</td>
-                  <td className="last r" style={{ whiteSpace: 'nowrap' }}>
-                    {can('editCatalog') && <button className="btn ghost sm" onClick={() => setUpdPid(p.id)}>Edit</button>}
-                    {editable && (isHidden(hidden, p.id)
-                      ? <button className="btn ghost sm" title="Order this game at this hall again"
-                          onClick={() => setHidden(p, false)}>Unhide</button>
-                      : <button className="btn ghost sm"
-                          title="Put this game away for this hall only — it stops appearing here and on Inventory. Nothing is deleted."
-                          onClick={() => setHidden(p, true)}>Hide</button>)}
-                  </td>
+                  <td className="r mono">{needsCost(p)
+                    ? <button className="tbd" title="No cost yet — the PO goes out with ? and the distributor fills it in. Click to enter it now."
+                        onClick={() => setUpdPid(p.id)}>?</button>
+                    : fmtMoney(p.cost)}</td>
+                  <td className="r mono">{n ? (needsCost(p) ? <span className="tbd">?</span> : <b>{fmtMoney(n * Number(p.cost))}</b>) : ''}</td>
+                  <td className="r mono">{needsTickets(p) ? '—' : Number(p.tickets).toLocaleString()}</td>
+                  <td className="dim" style={{ fontSize: 12 }}>{vmap[p.vendor_id]?.name}</td>
+                  <td className="last r"><button className="btn ghost sm" onClick={() => setUpdPid(p.id)}>Edit</button></td>
                 </tr>
               );
-            }}</GroupedProductRows>
+            })}
           </tbody>
         </table>
         {rows.length === 0 && <div style={{ padding: 30, textAlign: 'center' }} className="dimmer">No games match.</div>}

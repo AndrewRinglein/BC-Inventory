@@ -1,19 +1,23 @@
-// Role system — role comes from the URL (?role=...), by explicit decision "links and
-// HTML parameters (unsecure)". A shared site password still gates entry; the link picks
-// what the person can DO. Distribute one link per person:
+// Role system — role comes from the URL (?role=...), as in the bingo app this was
+// copied from. A shared site password still gates entry; the link picks what the
+// person can DO. Distribute one link per person:
 //
-//   https://yourapp.com/?role=admin        Super Admin — everything
-//   https://yourapp.com/?role=sc           Inventory Master, Santa Clara
-//   https://yourapp.com/?role=rwc          Inventory Master, Redwood City
-//   https://yourapp.com/?role=accountant   Accountant — read all, mark invoices paid
+//   https://yourapp.com/?role=admin        Admin — everything
+//   https://yourapp.com/?role=floor        Floor / inventory — order, receive, open, report
+//   https://yourapp.com/?role=accountant   Accountant — read all, reports, mark invoices paid
 //
 // Add &demo to any link for the staged sandbox: https://yourapp.com/?role=admin&demo
+//
+// BC is one location. The hall id 'bc' is kept internally so every query that
+// filters by hall keeps working; nobody ever picks a hall.
+
+export const HALL_ID = 'bc';
+export const HALL_NAME = 'BC';
 
 export const ROLES = {
-  admin:      { label: 'Super Admin',            home: null,  badge: 'b-teal' },
-  sc:         { label: 'Inventory Master — SC',  home: 'sc',  badge: 'b-green' },
-  rwc:        { label: 'Inventory Master — RWC', home: 'rwc', badge: 'b-green' },
-  accountant: { label: 'Accountant',             home: null,  badge: 'b-gold' },
+  admin:      { label: 'Admin',            home: HALL_ID, badge: 'b-teal' },
+  floor:      { label: 'Floor / Inventory', home: HALL_ID, badge: 'b-green' },
+  accountant: { label: 'Accountant',       home: HALL_ID, badge: 'b-gold' },
 };
 
 export function roleFromUrl() {
@@ -36,19 +40,16 @@ export function roleLink(roleId, demo) {
 
 /**
  * Central permission check. Actions:
- *  order / send      build + send purchase orders          (masters: own hall; admin)
- *  receive           receive shipments                     (masters: own hall; admin)
- *  boxes             open / sold-out / return / set-aside  (masters: own hall; admin)
- *  markPaid          mark invoices paid                    (accountant; admin)
- *  editCatalog       add/edit games & prices               (admin only)
+ *  order / send      build + send purchase orders          (floor, admin)
+ *  receive           receive deliveries                    (floor, admin)
+ *  boxes             open / remainder / sold out / close   (floor, admin)
+ *  markPaid          mark invoices paid                    (accountant, admin)
+ *  editCatalog       change existing game values & prices  (admin only)
  *  settings          settings screen                       (admin only)
  */
-export function can(roleId, action, hall) {
+export function can(roleId, action) {
   if (roleId === 'admin') return true;
-  const role = ROLES[roleId];
-  if (!role) return false;
   if (roleId === 'accountant') return action === 'markPaid';
-  // inventory masters
-  if (['order', 'send', 'receive', 'boxes'].includes(action)) return hall === role.home;
+  if (roleId === 'floor') return ['order', 'send', 'receive', 'boxes'].includes(action);
   return false;
 }

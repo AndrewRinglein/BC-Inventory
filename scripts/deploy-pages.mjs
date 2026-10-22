@@ -2,7 +2,7 @@
 //
 // Two things here are not optional, and both have broken the live site before.
 //
-// 1. The bundle must be built with BASE_PATH=/Inventory-Management/. GitHub Pages
+// 1. The bundle must be built with BASE_PATH=/BC-Inventory/. GitHub Pages
 //    serves this repo as a PROJECT site, so the app lives under a subpath. A
 //    default `vite build` emits src="/assets/..." which resolves to the domain
 //    root and 404s — a blank page, no error anyone can read. Use `npm run deploy`,
@@ -27,9 +27,9 @@ const GHP = path.join(ROOT, '.ghp');
 if (!fs.existsSync(DIST)) throw new Error('no dist/ — run npm run build:pages first');
 
 const html = fs.readFileSync(path.join(DIST, 'index.html'), 'utf8');
-if (!html.includes('/Inventory-Management/assets/')) {
+if (!html.includes('/BC-Inventory/assets/')) {
   throw new Error(
-    'dist/index.html does not reference /Inventory-Management/assets/ — it was built\n'
+    'dist/index.html does not reference /BC-Inventory/assets/ — it was built\n'
     + 'without BASE_PATH and would deploy a blank page. Run: npm run build:pages');
 }
 if (!fs.existsSync(GHP)) throw new Error('no .ghp worktree — git worktree add .ghp gh-pages');

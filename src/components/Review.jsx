@@ -4,10 +4,9 @@ import { buildDrafts, nextPoNum, fmtMoney } from '../lib/logic/po.js';
 import { buildOrderEmails, senderFor, PO_TEXT_DEFAULTS } from '../lib/logic/emails.js';
 import { addressResolver } from '../lib/logic/halls.js';
 
-const HALL_NAMES = { sc: 'Santa Clara', rwc: 'Redwood City' };
 
 export default function Review() {
-  const { hall, products, vendors, orderQty, settings, store, reloadHall, reloadSettings, setScreen, setToast, IS_DEMO, can } = useContext(AppCtx);
+  const { hall, hallName, products, vendors, orderQty, settings, store, reloadHall, reloadSettings, setScreen, setToast, IS_DEMO, can } = useContext(AppCtx);
   const [emailIdx, setEmailIdx] = useState(0);
   const [busy, setBusy] = useState(false);
   const [edits, setEdits] = useState({});   // idx -> {subject, body}
@@ -25,7 +24,6 @@ export default function Review() {
   const vendorNames = drafts.map((d) => d.vendor_name).join(', ');
 
   const emailCfg = settings.email || {};
-  const hallName = HALL_NAMES[hall];
   // a vendor may deliver somewhere other than the hall itself
   const hallAddress = addressResolver(settings.halls_config, hall);
   const accounting = emailCfg.accountingAddress || '(accounting address not set — Settings)';

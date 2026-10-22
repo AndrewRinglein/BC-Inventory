@@ -364,7 +364,7 @@ export class DemoStore {
     if (dup) throw new Error(`${product.name} #${s} was already received.`);
     const when = receivedOn ? atLocalNoonIso(receivedOn, true) : new Date().toISOString();
     const fields = {
-      serial: s, shipment_id: shipmentId, received_on: receivedOn || when.slice(0, 10),
+      serial: s, shipment_id: shipmentId, received_on: receivedOn || localYmd(),
       received_at: when, game_snapshot: gameSnapshot(product),
     };
     let box = poId && this.db.boxes.find((b) => b.po_id === poId && b.product_id === product.id && b.state === 'on_order');
@@ -398,7 +398,9 @@ export class DemoStore {
   /** Open a box on the floor. openedOn = the session date picked on the Open screen. */
   async openBox(boxId, { openedOn } = {}) {
     const i = this.db.boxes.findIndex((x) => x.id === boxId);
-    const next = transition(this.db.boxes[i], 'opened');
+    const cur = this.db.boxes[i];
+    if (cur.state !== 'in_inventory') throw new Error(`That box is already ${cur.state === 'opened' ? 'open' : cur.state.replace('_', ' ')}.`);
+    const next = transition(cur, 'opened');
     next.opened_on = openedOn || localYmd();
     this.db.boxes[i] = next;
     this._event('box.open', 'boxes', boxId, { label: `Opened ${this._nm(next)}`, opened_on: next.opened_on });
@@ -407,7 +409,7 @@ export class DemoStore {
   }
   async undoOpen(boxId) {
     const i = this.db.boxes.findIndex((x) => x.id === boxId);
-    this.db.boxes[i] = transition(this.db.boxes[i], 'in_inventory');
+    this.db.boxes[i] = { ...transition(this.db.boxes[i], 'in_inventory'), tickets_remaining: null };
     this._event('box.unopen', 'boxes', boxId, { label: `Open undone — ${this._nm(this.db.boxes[i])}` });
     this._save();
   }
@@ -436,10 +438,11 @@ export class DemoStore {
     this._save();
   }
 
-  async soldOut(boxId) {
+  async soldOut(boxId, { sessionDate } = {}) {
     const i = this.db.boxes.findIndex((x) => x.id === boxId);
     const next = transition(this.db.boxes[i], 'sold_out');
     next.tickets_remaining = 0;
+    next.closed_on = sessionDate || localYmd();
     this.db.boxes[i] = next;
     this._event('box.soldout', 'boxes', boxId, { label: `Sold out — ${this._nm(next)}` });
     this._save();
@@ -453,6 +456,7 @@ export class DemoStore {
     const n = checkCount(ticketsLeft, b, this.db.products);
     const next = transition(b, 'closed_unsold');
     next.tickets_remaining = n;
+    next.closed_on = sessionDate || localYmd();
     this.db.boxes[i] = next;
     (this.db.box_counts ||= []).push({ id: uid(), box_id: boxId, hall_id: b.hall_id, tickets_left: n,
       session_date: sessionDate || localYmd(), counted_at: new Date().toISOString(), kind: 'close' });
@@ -476,6 +480,7 @@ export class DemoStore {
     const prev = (this.db.box_counts || []).filter((c) => c.box_id === boxId)
       .sort((x, y) => String(y.counted_at).localeCompare(String(x.counted_at)))[0];
     next.tickets_remaining = prev ? prev.tickets_left : null;
+    next.closed_on = null;
     this.db.boxes[i] = next;
     this._event('box.reopen', 'boxes', boxId, { label: `Reopened — ${this._nm(next)}` });
     this._save();
@@ -657,6 +662,7 @@ function stagedSeed() {
           opened_at: o.open != null ? at(o.open, 18, 10 + i) : null,
           sold_out_at: st === 'sold_out' ? at(o.close, 21, 30 + i) : null,
           closed_at: st === 'closed_unsold' ? at(o.close, 21, 45) : null,
+          closed_on: st === 'sold_out' || st === 'closed_unsold' ? ymd(o.close) : null,
           tickets_remaining: o.left ?? (st === 'sold_out' ? 0 : null),
         };
         db.boxes.push(box);

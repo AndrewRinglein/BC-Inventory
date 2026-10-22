@@ -1,6 +1,5 @@
 import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppCtx } from '../App.jsx';
-import { fmtMoney } from '../lib/logic/po.js';
 import { resolveReceiveScan } from '../lib/logic/scan.js';
 import { fmtYmd } from '../lib/logic/bc.js';
 import { buildShortageEmail, buildDeliveredEmail, senderFor } from '../lib/logic/emails.js';
@@ -43,7 +42,8 @@ export default function Receive() {
   const live = useRef({});
   live.current = { products, boxes, poId, shipment, receivedOn, invoiceNo };
 
-  const started = scanned.length > 0;
+  // a delivery record exists from the first scan, even if every scan is undone
+  const started = !!shipment || scanned.length > 0;
 
   useEffect(() => {
     if (po) store.getPoLines(po.id).then((ls) => setLines(ls.filter((l) => l.kind !== 'fee' && l.product_id)));
@@ -53,6 +53,24 @@ export default function Receive() {
   useEffect(() => { store.getArrivals(hall).then(setArrivals).catch(() => setArrivals([])); }, [hall, boxes, store]);
 
   useEffect(() => { if (stage === 'scan' && !addGame) scanBoxRef.current?.focus(); }, [stage, addGame, poId]);
+
+  // A screen left up overnight must not file the next delivery under yesterday:
+  // until a delivery starts, the date follows the calendar unless someone picked one.
+  const pickedRef = useRef(false);
+  const lastToday = useRef(today());
+  useEffect(() => {
+    const tick = () => {
+      const t = today();
+      if (t !== lastToday.current) {
+        if (!pickedRef.current && !live.current.shipment) setReceivedOn(t);
+        lastToday.current = t;
+      }
+    };
+    const iv = setInterval(tick, 60000);
+    document.addEventListener('visibilitychange', tick);
+    window.addEventListener('focus', tick);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', tick); window.removeEventListener('focus', tick); };
+  }, []);   // eslint-disable-line
 
   /** The delivery record, created the first time a box is scanned. */
   const ensureShipment = async () => {
@@ -75,7 +93,8 @@ export default function Receive() {
     });
     const onPo = cur.poId ? box.source === 'po' : null;
     setScanned((xs) => [{ box, product, onPo, at: new Date().toISOString() }, ...xs]);
-    await reloadHall();
+    const fresh = await reloadHall();
+    if (fresh) live.current.boxes = fresh;
     return box;
   };
 
@@ -86,7 +105,15 @@ export default function Receive() {
   };
 
   /** One path for every scan, from the scanner or the box. Scans run one at a time. */
+  /** Every write that can follow a scan runs through one queue, one at a time. */
+  const enqueue = (fn) => {
+    const p = queue.current.then(fn, fn);
+    queue.current = p.catch(() => {});
+    return p;
+  };
+
   const handleScan = (raw) => {
+    setCode('');      // a scanner types into the focused box too; clear it every time
     const run = async () => {
       if (!can('receive')) return { ok: false, message: 'Your role can\'t receive deliveries.' };
       if (stage !== 'scan') return { ok: false, message: 'Finish or close the emails first.' };
@@ -106,9 +133,7 @@ export default function Receive() {
         return { ok: false, message: e.message };
       }
     };
-    const p = queue.current.then(run, run);
-    queue.current = p.catch(() => {});
-    return p;
+    return enqueue(run);
   };
 
   // own the scanner while this screen is up
@@ -140,7 +165,7 @@ export default function Receive() {
   const startOver = () => {
     setShipment(null); live.current.shipment = null;
     setScanned([]); setInvoiceNo(''); setEmails(null); setStage('scan');
-    setReceivedOn(today()); setReceivingPo(null);
+    setReceivedOn(today()); pickedRef.current = false; setReceivingPo(null);
   };
 
   // ---- Done ----
@@ -252,7 +277,7 @@ export default function Receive() {
           <div className="field" style={{ margin: 0 }}>
             <label>Day received</label>
             <input type="date" value={receivedOn} max={today()} disabled={started}
-              onChange={(e) => setReceivedOn(e.target.value || today())} />
+              onChange={(e) => { const v = e.target.value || today(); pickedRef.current = v !== today(); setReceivedOn(v); }} />
           </div>
           <div className="field" style={{ margin: 0 }}>
             <label>Invoice number</label>
@@ -375,11 +400,13 @@ export default function Receive() {
           onSaved={async (product) => {
             const serial = addGame.serial;
             setAddGame(null);
-            try {
-              const box = await receive(product, serial);
-              flashFor(true);
-              setToast(`✓ ${product.name} #${serial}`, () => undoOne(box.id));
-            } catch (e) { flashFor(false); setToast(e.message, null, 6000); }
+            await enqueue(async () => {
+              try {
+                const box = await receive(product, serial);
+                flashFor(true);
+                setToast(`✓ ${product.name} #${serial}`, () => undoOne(box.id));
+              } catch (e) { flashFor(false); setToast(e.message, null, 6000); }
+            });
           }} />
       )}
     </div>

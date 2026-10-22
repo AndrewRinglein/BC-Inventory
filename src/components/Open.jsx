@@ -3,6 +3,7 @@ import { AppCtx } from '../App.jsx';
 import { resolveOpenScan } from '../lib/logic/scan.js';
 import { ticketsIn, fmtDateTime, fmtYmd } from '../lib/logic/bc.js';
 import { closedAt } from '../lib/logic/boxes.js';
+import { closedDay } from '../lib/logic/report.js';
 import AddGameModal from './AddGameModal.jsx';
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
@@ -105,15 +106,33 @@ export default function Open() {
   const openList = useMemo(() => boxes.filter((b) => b.state === 'opened')
     .sort((a, b) => String(a.opened_at || '').localeCompare(String(b.opened_at || ''))), [boxes]);
   const closedToday = useMemo(() => boxes.filter((b) => {
-    const at = closedAt(b);
-    return at && localDay(at) === sessionDate;
+    return closedAt(b) && closedDay(b) === sessionDate;
   }).sort((a, b) => String(closedAt(b)).localeCompare(String(closedAt(a)))), [boxes, sessionDate]);
 
   useEffect(() => { if (!ask && !addGame) scanBoxRef.current?.focus(); }, [ask, addGame]);
 
+  // A screen left up overnight must not quietly file the next session under
+  // yesterday: follow the calendar unless someone deliberately picked another day.
+  const pickedRef = useRef(false);
+  const lastToday = useRef(today());
+  useEffect(() => {
+    const tick = () => {
+      const t = today();
+      if (t !== lastToday.current) {
+        if (!pickedRef.current) setSessionDate(t);
+        lastToday.current = t;
+      }
+    };
+    const iv = setInterval(tick, 60000);
+    document.addEventListener('visibilitychange', tick);
+    window.addEventListener('focus', tick);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', tick); window.removeEventListener('focus', tick); };
+  }, []);   // eslint-disable-line
+
   const open = async (box, product) => {
     await store.openBox(box.id, { openedOn: live.current.sessionDate });
-    await reloadHall();
+    const fresh = await reloadHall();
+    if (fresh) live.current.boxes = fresh;
     return {
       ok: true,
       message: `✓ Opened ${product.name} #${box.serial}`,
@@ -121,7 +140,15 @@ export default function Open() {
     };
   };
 
+  /** Every write that can follow a scan runs through one queue, one at a time. */
+  const enqueue = (fn) => {
+    const p = queue.current.then(fn, fn);
+    queue.current = p.catch(() => {});
+    return p;
+  };
+
   const handleScan = (raw) => {
+    setCode('');      // a scanner types into the focused box too; clear it every time
     const run = async () => {
       if (!editable) return { ok: false, message: 'Your role can\'t open boxes.' };
       const cur = live.current;
@@ -139,9 +166,7 @@ export default function Open() {
       }
       return { ok: false, message: r.message };
     };
-    const p = queue.current.then(run, run);
-    queue.current = p.catch(() => {});
-    return p;
+    return enqueue(run);
   };
 
   useEffect(() => {
@@ -160,7 +185,7 @@ export default function Open() {
   };
 
   /** Receive a box nobody checked in, then open it — so the floor is never blocked. */
-  const receiveAndOpen = async (product, serial) => {
+  const receiveAndOpen = (product, serial) => enqueue(async () => {
     const box = await store.receiveBox({ hallId: hall, product, serial, receivedOn: live.current.sessionDate });
     const r = await open(box, product);
     flashFor(true);
@@ -168,7 +193,7 @@ export default function Open() {
       await store.undoOpen(box.id); await store.undoReceiveBox(box.id); await reloadHall();
     });
     return r;
-  };
+  });
 
   const act = async (fn) => {
     setBusy(true);
@@ -177,7 +202,7 @@ export default function Open() {
   };
 
   const doSoldOut = (box) => act(async () => {
-    await store.soldOut(box.id);
+    await store.soldOut(box.id, { sessionDate });
     await reloadHall();
     setAsk(null);
     setToast(`Sold out — ${pmap[box.product_id]?.name} #${box.serial}`,
@@ -185,7 +210,7 @@ export default function Open() {
   });
 
   const doRemainder = (box, n) => act(async () => {
-    if (n === 0) { await store.soldOut(box.id); }
+    if (n === 0) { await store.soldOut(box.id, { sessionDate }); }
     else { await store.recordRemainder(box.id, n, { sessionDate }); }
     await reloadHall();
     setAsk(null);
@@ -220,10 +245,11 @@ export default function Open() {
       <div className="card pad" style={{ marginBottom: 14, display: 'flex', gap: 14, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div className="field" style={{ margin: 0 }}>
           <label>Session date</label>
-          <input type="date" value={sessionDate} max={today()} onChange={(e) => setSessionDate(e.target.value || today())}
+          <input type="date" value={sessionDate} max={today()}
+            onChange={(e) => { const v = e.target.value || today(); pickedRef.current = v !== today(); setSessionDate(v); }}
             style={{ fontWeight: 600 }} />
         </div>
-        {!isToday && <span className="badge b-gold" style={{ marginBottom: 6 }}>Not today — opens record this date with the time of the scan</span>}
+        {!isToday && <span className="badge b-gold" style={{ marginBottom: 6 }}>Not today — opens and closes are filed under {fmtYmd(sessionDate)}, with the actual time of each scan</span>}
         <div style={{ flex: 1 }} />
         {editable ? (
           <form onSubmit={typed} style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
@@ -346,10 +372,4 @@ export default function Open() {
       )}
     </div>
   );
-}
-
-function localDay(iso) {
-  const d = new Date(iso);
-  const p = (v) => String(v).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }

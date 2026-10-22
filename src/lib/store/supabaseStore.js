@@ -442,13 +442,21 @@ export class SupabaseStore {
   }
 
   async openBox(boxId, { openedOn } = {}) {
-    const box = ok(await this.sb.from('boxes').update({ state: 'opened', opened_on: openedOn || localYmd() })
-      .eq('id', boxId).select().single());
+    // only a SEALED box opens. Without the state filter, a box another PC already
+    // sold out would be reopened through the trigger's undo path, keeping its old
+    // close stamp and landing on the wrong day of the report.
+    const rows = ok(await this.sb.from('boxes').update({ state: 'opened', opened_on: openedOn || localYmd() })
+      .eq('id', boxId).eq('state', 'in_inventory').select());
+    if (!rows.length) {
+      const cur = await this._box(boxId);
+      throw new Error(`That box is already ${cur.state === 'opened' ? 'open' : cur.state.replace('_', ' ')}.`);
+    }
+    const box = rows[0];
     await this.logEvent('box.open', 'boxes', boxId, { label: `Opened ${await this._name(box)}`, opened_on: box.opened_on });
     return box;
   }
   async undoOpen(boxId) {
-    const box = ok(await this.sb.from('boxes').update({ state: 'in_inventory', opened_at: null, opened_on: null })
+    const box = ok(await this.sb.from('boxes').update({ state: 'in_inventory', opened_at: null, opened_on: null, tickets_remaining: null })
       .eq('id', boxId).select().single());
     await this.logEvent('box.unopen', 'boxes', boxId, { label: `Open undone — ${await this._name(box)}` });
   }
@@ -476,8 +484,8 @@ export class SupabaseStore {
     ok(await this.sb.from('boxes').update({ tickets_remaining: prev[0]?.tickets_left ?? null }).eq('id', row.box_id));
   }
 
-  async soldOut(boxId) {
-    const box = ok(await this.sb.from('boxes').update({ state: 'sold_out', tickets_remaining: 0 })
+  async soldOut(boxId, { sessionDate } = {}) {
+    const box = ok(await this.sb.from('boxes').update({ state: 'sold_out', tickets_remaining: 0, closed_on: sessionDate || localYmd() })
       .eq('id', boxId).select().single());
     await this.logEvent('box.soldout', 'boxes', boxId, { label: `Sold out — ${await this._name(box)}` });
     return box;
@@ -489,7 +497,7 @@ export class SupabaseStore {
     transition(b, 'closed_unsold');                       // readable error before the DB's
     const prods = ok(await this.sb.from('products').select('*').eq('id', b.product_id));
     const n = checkCount(ticketsLeft, b, prods);
-    const box = ok(await this.sb.from('boxes').update({ state: 'closed_unsold', tickets_remaining: n })
+    const box = ok(await this.sb.from('boxes').update({ state: 'closed_unsold', tickets_remaining: n, closed_on: sessionDate || localYmd() })
       .eq('id', boxId).select().single());
     ok(await this.sb.from('box_counts').insert({
       box_id: boxId, hall_id: b.hall_id, tickets_left: n, kind: 'close', session_date: sessionDate || localYmd(),
@@ -509,7 +517,7 @@ export class SupabaseStore {
     const prev = ok(await this.sb.from('box_counts').select('tickets_left').eq('box_id', boxId)
       .order('counted_at', { ascending: false }).limit(1));
     const box = ok(await this.sb.from('boxes').update({
-      state: 'opened', sold_out_at: null, closed_at: null, tickets_remaining: prev[0]?.tickets_left ?? null,
+      state: 'opened', sold_out_at: null, closed_at: null, closed_on: null, tickets_remaining: prev[0]?.tickets_left ?? null,
     }).eq('id', boxId).select().single());
     await this.logEvent('box.reopen', 'boxes', boxId, { label: `Reopened — ${await this._name(box)}` });
     return box;

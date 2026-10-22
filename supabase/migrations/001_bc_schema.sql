@@ -164,7 +164,8 @@ create table boxes (
   opened_on         date,           -- the session date picked on Open
   opened_at         timestamptz,    -- exact time of the open scan
   sold_out_at       timestamptz,
-  closed_at         timestamptz     -- closed unsold
+  closed_at         timestamptz,    -- closed unsold
+  closed_on         date            -- the session date picked on Open when it sold out / closed
 );
 create index boxes_hall_state on boxes (hall_id, state);
 create index boxes_po on boxes (po_id);

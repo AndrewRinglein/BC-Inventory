@@ -13,6 +13,11 @@ export function monthBounds(ym) {
   return { from: `${ym}-01`, to: `${ym}-${String(last).padStart(2, '0')}` };
 }
 
+/** The session day a box was opened / closed: the date picked on Open, else the scan's local day. */
+export const openedDay = (b) => b?.opened_on || dayOf(b?.opened_at);
+export const closedDay = (b) => b?.closed_on || dayOf(closedAt(b));
+const inDays = (d, period) => !!d && d >= period.from && d <= period.to;
+
 /** Did this timestamp happen on a day inside the period, in local time? */
 export const inPeriod = (iso, period) => {
   const d = dayOf(iso);
@@ -50,15 +55,14 @@ export function buildReport({ boxes, products, vendors, shipments, period }) {
   const smap = Object.fromEntries((shipments || []).map((s) => [s.id, s]));
   const ctx = { pmap, vmap, smap };
   const closed = (boxes || [])
-    .filter((b) => (b.state === 'sold_out' || b.state === 'closed_unsold') && inPeriod(closedAt(b), period))
+    .filter((b) => (b.state === 'sold_out' || b.state === 'closed_unsold') && inDays(closedDay(b), period))
     .map((b) => reportRow(b, ctx));
-  const opened = (boxes || []).filter((b) => b.opened_at && inPeriod(b.opened_at, period)).map((b) => reportRow(b, ctx));
+  const opened = (boxes || []).filter((b) => b.opened_at && inDays(openedDay(b), period)).map((b) => reportRow(b, ctx));
 
-  // still open at the end of the last day of the period
-  const [y, m, d] = period.to.split('-').map(Number);
-  const end = new Date(y, m - 1, d, 23, 59, 59, 999).toISOString();
-  const stillOpen = (boxes || []).filter((b) => b.opened_at && b.opened_at <= end
-    && (!closedAt(b) || closedAt(b) > end)).length;
+  // still open at the end of the last session day of the period (compared as
+  // calendar days, so the database's timestamp format never matters)
+  const stillOpen = (boxes || []).filter((b) => b.opened_at && openedDay(b) <= period.to
+    && (!closedAt(b) || closedDay(b) > period.to)).length;
 
   const sold = closed.filter((r) => r.b.state === 'sold_out');
   const sum = (rows, k) => Math.round(rows.reduce((a, r) => a + (Number(r.g[k]) || 0), 0) * 100) / 100;

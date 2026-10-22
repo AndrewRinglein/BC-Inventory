@@ -412,3 +412,44 @@ test('the training sandbox has boxes at every stage, each closed box with its ti
   }
   assert.ok(boxes.some((b) => b.state === 'opened' && b.tickets_remaining != null));
 });
+
+// ---------------------------------------------------------------- from the independent review
+test('a closed box cannot be put back on the floor by opening it', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '31' });
+  await s.openBox(box.id);
+  await assert.rejects(() => s.openBox(box.id), /already open/);
+  await s.soldOut(box.id);
+  await assert.rejects(() => s.openBox(box.id), /already sold out/);
+});
+test('closes carry the session date picked on Open', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '32' });
+  await s.openBox(box.id, { openedOn: '2026-10-16' });
+  await s.soldOut(box.id, { sessionDate: '2026-10-16' });
+  const b = (await s.getBoxes('bc')).find((x) => x.id === box.id);
+  assert.equal(b.closed_on, '2026-10-16');
+  await s.reopenBox(box.id);
+  assert.equal((await s.getBoxes('bc')).find((x) => x.id === box.id).closed_on, null);
+});
+test('the report files a box by its session dates, not the scan clock', () => {
+  // Friday's session entered on Saturday morning
+  const b = { id: 'z', product_id: 'G1', serial: '9', state: 'sold_out',
+    opened_on: '2026-10-16', opened_at: at(2026, 10, 17, 9), closed_on: '2026-10-16', sold_out_at: at(2026, 10, 17, 9) };
+  const fri = buildReport({ boxes: [b], products: [G()], vendors, shipments: [], period: { from: '2026-10-16', to: '2026-10-16' } });
+  const sat = buildReport({ boxes: [b], products: [G()], vendors, shipments: [], period: { from: '2026-10-17', to: '2026-10-17' } });
+  assert.equal(fri.closed.length, 1);
+  assert.equal(fri.opened.length, 1);
+  assert.equal(sat.closed.length + sat.opened.length, 0);
+});
+test('undoing an open clears any remainder on the box', async () => {
+  const s = await freshStore();
+  const g = await prod(s, 'CR3');
+  const box = await s.receiveBox({ hallId: 'bc', product: g, serial: '33' });
+  await s.openBox(box.id);
+  await s.recordRemainder(box.id, 300);
+  await s.undoOpen(box.id);
+  assert.equal((await s.getBoxes('bc')).find((x) => x.id === box.id).tickets_remaining, null);
+});

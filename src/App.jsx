@@ -72,6 +72,7 @@ export default function App() {
       store.getBoxCounts(hall),
     ]);
     setBoxes(bx); setPos(ps); setPayments(pay); setOrderQtyState(oq); setBoxCounts(bc);
+    return bx;      // queued scans read this at once, before React re-renders
   }, [hall]);
 
   const reloadCatalog = useCallback(async () => {

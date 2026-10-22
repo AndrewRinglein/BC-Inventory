@@ -173,7 +173,7 @@ create index boxes_shipment on boxes (shipment_id);
 create index boxes_sold_out_at on boxes (sold_out_at) where sold_out_at is not null;
 create index boxes_closed_at on boxes (closed_at) where closed_at is not null;
 -- one box per game + serial (placeholders have no serial yet)
-create unique index boxes_game_serial on boxes (product_id, serial) where serial <> '';
+create unique index boxes_game_serial on boxes (product_id, upper(btrim(serial))) where serial <> '';
 
 -- state machine guard: forbid illegal transitions and stamp the time server-side
 create or replace function guard_box_state() returns trigger as $$

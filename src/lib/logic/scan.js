@@ -12,7 +12,11 @@
 // matched on the serial alone; here the form number says which game the box is,
 // so a box can be received straight from a scan without asking.
 
-const BURST_MS = 45;
+// 100 ms between keys, matching the POS member-card scanner that already runs in
+// the field: people type at >100 ms a key, HID scanners at well under 30 ms, and
+// some Bluetooth scanners are slower than USB ones. A tighter limit (the bingo app
+// used 45 ms) risks splitting one barcode into two partial scans.
+const BURST_MS = 100;
 const MIN_LEN = 4;
 
 export function createScanCapture(onScan) {
@@ -36,12 +40,33 @@ export function createScanCapture(onScan) {
     }
     if (e.key.length === 1) buf += e.key;
   };
+  // A pasted code counts as a scan too (as on the POS): handy for testing with no
+  // scanner, and for a code copied from somewhere else.
+  const onPaste = (e) => {
+    const el = document.activeElement;
+    const inField = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+    if (inField && !el.dataset.scanTarget) return;
+    const text = ((e.clipboardData || window.clipboardData)?.getData('text') || '').trim();
+    if (text.length < MIN_LEN || !/\s/.test(text)) return;   // only "<form> <serial>" shapes
+    e.preventDefault();
+    buf = '';
+    onScan(text);
+  };
   document.addEventListener('keydown', handler, true);
-  return () => document.removeEventListener('keydown', handler, true);
+  document.addEventListener('paste', onPaste, true);
+  return () => {
+    document.removeEventListener('keydown', handler, true);
+    document.removeEventListener('paste', onPaste, true);
+  };
 }
 
 /** Codes compare as text, case- and space-insensitive: "cr5" is "CR5". */
 export const normCode = (s) => String(s ?? '').trim().toUpperCase().replace(/\s+/g, '');
+
+/** Serials are stored and compared trimmed and upper-case — the Bingo Vision
+ *  verifier matches form + serial the same way (trim, ignore case). Leading zeros
+ *  are kept: "000123" and "123" are different boxes. */
+export const normSerial = (s) => String(s ?? '').trim().toUpperCase();
 
 /**
  * Split one scan into form number + serial.
@@ -56,7 +81,7 @@ export function parseScan(code) {
   const m = s.match(/^(.+?)\s+(\S+)$/);
   if (!m) return null;
   const form = normCode(m[1]);
-  const serial = m[2].trim();
+  const serial = normSerial(m[2]);
   if (!form || !serial) return null;
   return { form, serial };
 }
@@ -76,8 +101,8 @@ export function gameForForm(products, form) {
 
 /** Every box of this game carrying this serial (normally zero or one). */
 export function boxesFor(boxes, productId, serial) {
-  const s = String(serial ?? '').trim();
-  return (boxes || []).filter((b) => b.product_id === productId && b.serial && String(b.serial).trim() === s);
+  const s = normSerial(serial);
+  return (boxes || []).filter((b) => b.product_id === productId && b.serial && normSerial(b.serial) === s);
 }
 
 /**

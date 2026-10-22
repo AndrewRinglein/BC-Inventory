@@ -5,6 +5,7 @@ import { CATALOG } from '../../data/catalog.js';
 import { perBoxValue } from '../logic/pricing.js';
 import { transition } from '../logic/boxes.js';
 import { gameSnapshot, checkCount, atLocalNoonIso, localYmd } from '../logic/bc.js';
+import { normSerial } from '../logic/scan.js';
 
 const uid = () => 'id_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
@@ -359,8 +360,8 @@ export class DemoStore {
 
   /** Receive one scanned box: claim a PO placeholder for this game, or create a box. */
   async receiveBox({ hallId, shipmentId = null, poId = null, product, serial, receivedOn }) {
-    const s = String(serial).trim();
-    const dup = this.db.boxes.find((b) => b.product_id === product.id && b.serial === s && b.state !== 'on_order');
+    const s = normSerial(serial);
+    const dup = this.db.boxes.find((b) => b.product_id === product.id && normSerial(b.serial) === s && b.serial && b.state !== 'on_order');
     if (dup) throw new Error(`${product.name} #${s} was already received.`);
     const when = receivedOn ? atLocalNoonIso(receivedOn, true) : new Date().toISOString();
     const fields = {

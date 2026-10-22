@@ -7,6 +7,7 @@ import { perBoxValue } from '../logic/pricing.js';
 import { round2 } from '../logic/po.js';
 import { gameSnapshot, checkCount, atLocalNoonIso, localYmd } from '../logic/bc.js';
 import { transition } from '../logic/boxes.js';
+import { normSerial } from '../logic/scan.js';
 
 const ok = ({ data, error }) => { if (error) throw new Error(error.message); return data; };
 
@@ -396,7 +397,7 @@ export class SupabaseStore {
 
   /** Receive one scanned box: claim a PO placeholder for this game, or create a box. */
   async receiveBox({ hallId, shipmentId = null, poId = null, product, serial, receivedOn }) {
-    const s = String(serial).trim();
+    const s = normSerial(serial);
     const dup = ok(await this.sb.from('boxes').select('id').eq('product_id', product.id)
       .eq('serial', s).neq('state', 'on_order').limit(1));
     if (dup.length) throw new Error(`${product.name} #${s} was already received.`);

@@ -65,6 +65,12 @@ test('a scan with no space is not a box barcode', () => {
 test('serials keep their leading zeros', () => {
   assert.equal(parseScan('CR3 000001').serial, '000001');
 });
+test('serials match ignoring case, like the Bingo Vision verifier', () => {
+  assert.equal(parseScan('bp52634 pack-a1').serial, 'PACK-A1');
+  const boxes = [{ id: 'b', product_id: 'G1', serial: 'pack-a1', state: 'in_inventory' }];
+  assert.equal(resolveOpenScan('CR3 PACK-A1', { products: [G()], boxes }).ok, true);
+  assert.equal(resolveReceiveScan('CR3 Pack-A1', { products: [G()], boxes }).reason, 'duplicate');
+});
 test('form numbers match case-insensitively, then by the alternate code', () => {
   const ps = [G(), G2, G({ id: 'G3', form_number: 'XCR2', vendor_sku: 'ALT-9' })];
   assert.equal(gameForForm(ps, 'cr3').id, 'G1');

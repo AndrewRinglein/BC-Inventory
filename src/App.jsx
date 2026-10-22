@@ -17,6 +17,7 @@ import Accounting from './components/Accounting.jsx';
 import Games from './components/Games.jsx';
 import SettingsScreen from './components/SettingsScreen.jsx';
 import History from './components/History.jsx';
+import Progressives from './components/Progressives.jsx';
 import { PinModal } from './components/PinModal.jsx';
 
 export const AppCtx = React.createContext(null);
@@ -81,7 +82,7 @@ export default function App() {
   }, []);
 
   const reloadSettings = useCallback(async () => {
-    const keys = ['email', 'po_sequence', 'admin_pin', 'halls_config', 'eom', 'sender', 'po_email', 'report'];
+    const keys = ['email', 'po_sequence', 'admin_pin', 'halls_config', 'eom', 'sender', 'po_email', 'report', 'progressives', 'progressive_display'];
     const entries = await Promise.all(keys.map(async (k) => [k, await store.getSetting(k)]));
     setSettings(Object.fromEntries(entries));
   }, []);
@@ -202,7 +203,7 @@ export default function App() {
   const SCREENS = {
     dashboard: Dashboard, purchase: Purchase, review: Review, receive: Receive, open: Open,
     reports: Reports, inventory: Inventory, orders: Orders, accounting: Accounting,
-    games: Games, settings: SettingsScreen, history: History,
+    games: Games, settings: SettingsScreen, history: History, progressives: Progressives,
   };
   const Screen = SCREENS[screen] || Dashboard;
 

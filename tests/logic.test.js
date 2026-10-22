@@ -521,3 +521,26 @@ test('one trigger pull with a space still works when a game is waiting', () => {
   const r = resolveReceiveScan('AN6303W 0099009', { products: field, boxes: [], pending: CANDY });
   assert.equal(r.product.id, 'G30');   // the combined scan names its own game
 });
+
+// ---- progressive jackpots ----
+import { parseSplit, defaultProgressives, currentAmount, hit as hitProg } from '../src/lib/logic/progressive.js';
+test('progressive: colour split becomes one jackpot per colour', () => {
+  assert.deepEqual(parseSplit('Red: 200, White: 100, Blue: 50').map((x) => x.amount), [200, 100, 50]);
+  const ps = defaultProgressives([{ id: 'G033', name: 'Freedom', progressive_amount: 350, progressive_note: 'Red: 200, White: 100, Blue: 50' },
+    { id: 'G1', name: 'Plain', progressive_amount: 25 }, { id: 'G2', name: 'None', progressive_amount: 0 }]);
+  assert.deepEqual(ps.map((p) => [p.name, p.per_box]), [['Freedom Red', 200], ['Freedom White', 100], ['Freedom Blue', 50], ['Plain', 25]]);
+});
+test('progressive: grows per sold-out box, resets on a hit', () => {
+  const p = { id: 'x', seed: 100, per_box: 50, adjust: 5, game_ids: ['G1'], reset_at: null };
+  const bx = [
+    { product_id: 'G1', state: 'sold_out', sold_out_at: '2026-10-01T10:00:00Z' },
+    { product_id: 'G1', state: 'opened' },
+    { product_id: 'G2', state: 'sold_out', sold_out_at: '2026-10-01T10:00:00Z' },
+  ];
+  assert.equal(currentAmount(p, bx), 155);
+  const after = hitProg(p, bx, '2026-10-02T00:00:00Z');
+  assert.equal(after.hits[0].amount, 155);
+  assert.equal(currentAmount(after, bx), 100);
+  bx.push({ product_id: 'G1', state: 'sold_out', sold_out_at: '2026-10-03T00:00:00Z' });
+  assert.equal(currentAmount(after, bx), 150);
+});

@@ -32,6 +32,7 @@ export default function Sidebar() {
       <Item id="open" label="Open" badge={openBoxes || null}
         title="Scan boxes onto the floor; sold out, remainder or close unsold" />
       <Item id="reports" label="Reports" title="Compliance report: every box opened and closed, by day, range or month" />
+      <Item id="progressives" label="Progressives" title="Every progressive jackpot, and the full-screen TV display" />
       <div className="sb-sec">Track</div>
       <Item id="inventory" label="Inventory" />
       <Item id="orders" label="Open Orders" badge={openPos || null} />

@@ -749,6 +749,12 @@ function seed() {
       halls_config: { bc: { address: '' } },
       demo_password: 'boxes',
       sender: { bc: { name: '', org: '', title: '', phone: '', replyTo: '' } },
+      // sample jackpots so the TV looks have something to show
+      progressives: [
+        { id: 'G033-red', name: 'Freedom Red', color: '#ff2a2a', seed: 500, per_box: 200, game_ids: ['G033'], reset_at: null, adjust: 1347, hits: [] },
+        { id: 'G033-white', name: 'Freedom White', color: '#f4f4f4', seed: 250, per_box: 100, game_ids: ['G033'], reset_at: null, adjust: 726, hits: [] },
+        { id: 'G033-blue', name: 'Freedom Blue', color: '#2a7bff', seed: 100, per_box: 50, game_ids: ['G033'], reset_at: null, adjust: 312, hits: [] },
+      ],
     },
   };
 }

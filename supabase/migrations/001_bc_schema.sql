@@ -50,7 +50,7 @@ create unique index products_form_number on products (upper(btrim(form_number)))
 
 -- A rename keeps the previous name as an alias, in the database, so it holds for the
 -- app, direct SQL and migrations alike.
-create or replace function keep_old_product_name() returns trigger language plpgsql as $$
+create or replace function keep_old_product_name() returns trigger language plpgsql set search_path = public as $$
 declare old_name text := btrim(coalesce(old.name, ''));
 begin
   if old_name <> '' and btrim(coalesce(new.name, '')) <> old_name then
@@ -194,7 +194,7 @@ begin
   if new.state = 'sold_out'      and new.sold_out_at is null then new.sold_out_at := now(); end if;
   if new.state = 'closed_unsold' and new.closed_at   is null then new.closed_at   := now(); end if;
   return new;
-end $$ language plpgsql;
+end $$ language plpgsql set search_path = public;
 create trigger boxes_state_guard before update on boxes
   for each row execute function guard_box_state();
 

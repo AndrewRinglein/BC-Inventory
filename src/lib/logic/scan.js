@@ -38,6 +38,10 @@ export function createScanCapture(onScan) {
       }
       return;
     }
+    // One trigger pull can send both numbers. Scanners separate them with a space
+    // (handled by readScan), an Enter (two scans in a row — the queue keeps them in
+    // order), or a Tab. A Tab inside a burst is a separator, not a focus change.
+    if (e.key === 'Tab' && buf) { e.preventDefault(); buf += ' '; return; }
     if (e.key.length === 1) buf += e.key;
   };
   // A pasted code counts as a scan too (as on the POS): handy for testing with no
@@ -120,14 +124,35 @@ export function gameForForm(products, form) {
  *   { type: 'unknown', code }                         a lone code that is no game we know
  */
 export function readScan(code, { products, pending = null }) {
-  const both = parseScan(code);
-  if (both) return { type: 'box', product: gameForForm(products, both.form), form: both.form, serial: both.serial };
-  const single = String(code ?? '').trim();
+  // same clean-up as the admin scanner: collapse runs of whitespace, trim
+  const clean = String(code ?? '').replace(/\s+/g, ' ').trim();
   // with a game waiting, the next scan is its serial (as in the admin scanner)
-  if (pending) return { type: 'box', product: pending, form: pending.form_number, serial: normSerial(single) };
-  const product = gameForForm(products, single);
+  if (pending && !/\s/.test(clean)) return { type: 'box', product: pending, form: pending.form_number, serial: normSerial(clean) };
+  const both = parseScan(clean);
+  if (both) {
+    const product = gameForForm(products, both.form);
+    if (product) return { type: 'box', product, form: both.form, serial: both.serial };
+    // not "<code> <serial>" after all — maybe a game NAME with a space in it
+    const named = gamesByName(products, clean);
+    if (named.length === 1) return { type: 'game', product: named[0] };
+    if (named.length > 1) return { type: 'choose', matches: named, code: clean };
+    return { type: 'box', product: null, form: both.form, serial: both.serial };
+  }
+  // the admin scanner's order: barcode first, then the game name
+  const product = gameForForm(products, clean);
   if (product) return { type: 'game', product };
-  return { type: 'unknown', code: normCode(single) };
+  const named = gamesByName(products, clean);
+  if (named.length === 1) return { type: 'game', product: named[0] };
+  if (named.length > 1) return { type: 'choose', matches: named, code: clean };
+  return { type: 'unknown', code: normCode(clean) };
+}
+
+/** Name search, as the admin scanner falls back to: active games whose name contains the text. */
+export function gamesByName(products, text) {
+  const q = String(text ?? '').trim().toLowerCase();
+  if (q.length < 3 || !/[a-z]/.test(q)) return [];
+  return (products || []).filter((p) => p.active !== false && String(p.name || '').toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 10);
 }
 
 /** Every box of this game carrying this serial (normally zero or one). */
@@ -142,6 +167,10 @@ function firstStep(code, ctx, verb) {
   if (r.type === 'game') {
     return { ok: true, action: 'pick', product: r.product,
       message: `${r.product.name} (form ${r.product.form_number}) — now scan the box serial.` };
+  }
+  if (r.type === 'choose') {
+    return { ok: false, reason: 'choose', matches: r.matches,
+      message: `${r.matches.length} games match "${r.code}" — pick one, then scan the box serial.` };
   }
   if (r.type === 'unknown') {
     return { ok: false, reason: 'unknown_game', form: r.code, serial: null,

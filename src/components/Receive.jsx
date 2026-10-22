@@ -5,6 +5,7 @@ import { fmtYmd } from '../lib/logic/bc.js';
 import { buildShortageEmail, buildDeliveredEmail, senderFor } from '../lib/logic/emails.js';
 import { receivedLine, missingLine, extraLine } from '../lib/logic/receiving.js';
 import AddGameModal from './AddGameModal.jsx';
+import GamePickModal from './GamePickModal.jsx';
 
 /**
  * Receive — check a delivery in by scanning every box.
@@ -33,6 +34,7 @@ export default function Receive() {
   const [lines, setLines] = useState([]);              // the PO's lines
   const [code, setCode] = useState('');
   const [addGame, setAddGame] = useState(null);        // { form, serial } from an unknown scan
+  const [choose, setChoose] = useState(null);         // several games match a typed name
   const [pending, setPending] = useState(null);        // game picked by a game-barcode scan; next scan is its serial
   const [stage, setStage] = useState('scan');          // scan | emails
   const [emails, setEmails] = useState(null);
@@ -53,7 +55,7 @@ export default function Receive() {
 
   useEffect(() => { store.getArrivals(hall).then(setArrivals).catch(() => setArrivals([])); }, [hall, boxes, store]);
 
-  useEffect(() => { if (stage === 'scan' && !addGame) scanBoxRef.current?.focus(); }, [stage, addGame, poId]);
+  useEffect(() => { if (stage === 'scan' && !addGame && !choose) scanBoxRef.current?.focus(); }, [stage, addGame, choose, poId]);
 
   // A screen left up overnight must not file the next delivery under yesterday:
   // until a delivery starts, the date follows the calendar unless someone picked one.
@@ -123,6 +125,7 @@ export default function Receive() {
       if (r.action === 'pick') { live.current.pending = r.product; setPending(r.product); return { ok: true, message: r.message }; }
       // a serial scanned for a picked game ends that game's turn, whatever happens next
       if (cur.pending) { live.current.pending = null; setPending(null); }
+      if (r.reason === 'choose') { setChoose(r.matches); return { ok: false, message: r.message }; }
       if (r.reason === 'unknown_game') { setAddGame({ form: r.form, serial: r.serial }); return { ok: false, message: r.message }; }
       if (!r.ok) return { ok: false, message: r.message };
       try {
@@ -304,7 +307,7 @@ export default function Receive() {
             <div className="field" style={{ margin: 0 }}>
               <label>Scan the game barcode, then the box serial</label>
               <input ref={scanBoxRef} type="text" data-scan-target="1" value={code}
-                onChange={(e) => setCode(e.target.value)} placeholder="game barcode, then serial"
+                onChange={(e) => setCode(e.target.value)} placeholder="scan, or type a game name"
                 style={{ width: 250, borderColor: 'var(--green)', fontFamily: "'IBM Plex Mono',monospace" }} />
             </div>
             <span className="scan-ind on"><span className="dot" />{scanned.length} scanned</span>
@@ -405,6 +408,11 @@ export default function Receive() {
         </div>
       )}
 
+      {choose && (
+        <GamePickModal matches={choose} onClose={() => setChoose(null)}
+          onPick={(p) => { setChoose(null); live.current.pending = p; setPending(p); flashFor(true);
+            setToast(`${p.name} (form ${p.form_number}) — now scan the box serial.`); }} />
+      )}
       {addGame && (
         <AddGameModal form={addGame.form} serial={addGame.serial}
           onClose={() => setAddGame(null)}

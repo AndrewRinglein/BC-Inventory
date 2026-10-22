@@ -5,6 +5,7 @@ import { ticketsIn, fmtDateTime, fmtYmd } from '../lib/logic/bc.js';
 import { closedAt } from '../lib/logic/boxes.js';
 import { closedDay } from '../lib/logic/report.js';
 import AddGameModal from './AddGameModal.jsx';
+import GamePickModal from './GamePickModal.jsx';
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
 
@@ -88,6 +89,7 @@ export default function Open() {
   const [code, setCode] = useState('');
   const [ask, setAsk] = useState(null);       // { kind: 'remainder'|'close'|'soldout'|'receive', box?, product?, serial? }
   const [addGame, setAddGame] = useState(null);
+  const [choose, setChoose] = useState(null);         // several games match a typed name
   const [pending, setPending] = useState(null);   // game picked by a game-barcode scan; next scan is its serial
   const [busy, setBusy] = useState(false);
   const scanBoxRef = useRef(null);
@@ -110,7 +112,7 @@ export default function Open() {
     return closedAt(b) && closedDay(b) === sessionDate;
   }).sort((a, b) => String(closedAt(b)).localeCompare(String(closedAt(a)))), [boxes, sessionDate]);
 
-  useEffect(() => { if (!ask && !addGame) scanBoxRef.current?.focus(); }, [ask, addGame]);
+  useEffect(() => { if (!ask && !addGame && !choose) scanBoxRef.current?.focus(); }, [ask, addGame, choose]);
 
   // A screen left up overnight must not quietly file the next session under
   // yesterday: follow the calendar unless someone deliberately picked another day.
@@ -163,6 +165,7 @@ export default function Open() {
         setAsk({ kind: 'receive', product: r.product, serial: r.serial });
         return { ok: false, message: r.message };
       }
+      if (r.reason === 'choose') { setChoose(r.matches); return { ok: false, message: r.message }; }
       if (r.reason === 'unknown_game') {
         setAddGame({ form: r.form, serial: r.serial });
         return { ok: false, message: r.message };
@@ -259,7 +262,7 @@ export default function Open() {
             <div className="field" style={{ margin: 0 }}>
               <label>Scan the game barcode, then the box serial</label>
               <input ref={scanBoxRef} type="text" data-scan-target="1" value={code}
-                onChange={(e) => setCode(e.target.value)} placeholder="game barcode, then serial"
+                onChange={(e) => setCode(e.target.value)} placeholder="scan, or type a game name"
                 style={{ width: 250, borderColor: 'var(--orange)', fontFamily: "'IBM Plex Mono',monospace" }} />
             </div>
             <span className="scan-ind on"><span className="dot" />scanner on</span>
@@ -370,6 +373,11 @@ export default function Open() {
             It will be received with no purchase order or invoice, dated {fmtYmd(sessionDate)}, then opened.
           </p>
         </ConfirmModal>
+      )}
+      {choose && (
+        <GamePickModal matches={choose} onClose={() => setChoose(null)}
+          onPick={(p) => { setChoose(null); live.current.pending = p; setPending(p); flashFor(true);
+            setToast(`${p.name} (form ${p.form_number}) — now scan the box serial.`); }} />
       )}
       {addGame && (
         <AddGameModal form={addGame.form} serial={addGame.serial}

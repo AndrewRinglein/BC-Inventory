@@ -507,3 +507,17 @@ test('Open takes the same two scans', () => {
   assert.equal(pick.action, 'pick');
   assert.equal(resolveOpenScan('77', { products: field, boxes, pending: pick.product }).box.id, 'b');
 });
+test('a typed game name picks the game, as the admin scanner allows', () => {
+  assert.equal(resolveReceiveScan('candy', { products: field, boxes: [] }).product.id, 'G11');
+  assert.equal(resolveReceiveScan('Wild Unicorn', { products: field, boxes: [] }).product.id, 'G30');
+});
+test('a name that matches several games asks which one', () => {
+  const two = [...field, G({ id: 'G31', name: 'Wild Unicorn Deluxe', form_number: '6303X' })];
+  const r = resolveReceiveScan('unicorn', { products: two, boxes: [] });
+  assert.equal(r.reason, 'choose');
+  assert.equal(r.matches.length, 2);
+});
+test('one trigger pull with a space still works when a game is waiting', () => {
+  const r = resolveReceiveScan('AN6303W 0099009', { products: field, boxes: [], pending: CANDY });
+  assert.equal(r.product.id, 'G30');   // the combined scan names its own game
+});

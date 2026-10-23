@@ -39,7 +39,7 @@ export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, 
   const item = items[i] || { id: 'none', name: 'No progressives yet', color: '#ffc21a', amount: 0 };
   const props = { item, items, index: i, preview };
   return (
-    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}`} style={{ '--c': item.color }}
+    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
       onDoubleClick={!preview ? onExit : undefined}>
       {look === 'inferno' && <Inferno {...props} />}
       {look === 'marquee' && <Marquee {...props} />}
@@ -207,7 +207,7 @@ function Marquee({ item }) {
       <Bulbs />
       <Particles kind="sparks" />
       <div className="jp-stage" key={item.id}>
-        <div className="jp-title">★ JACKPOT ★</div>
+        <div className="jp-title">★ PROGRESSIVE JACKPOT ★</div>
         <div className="jp-name">{item.name}</div>
         <Amount item={item} />
         <div className="jp-sub">PROGRESSIVE · PLAY NOW</div>
@@ -239,7 +239,7 @@ function Led({ item, items }) {
   return (
     <>
       <div className="jp-stage" key={item.id}>
-        <div className="jp-title"><span className="blink">●</span> PROGRESSIVE NOW AT <span className="blink">●</span></div>
+        <div className="jp-title"><span className="blink">●</span> PROGRESSIVE <span className="blink">●</span></div>
         <div className="jp-name">{item.name}</div>
         <Amount item={item} />
       </div>

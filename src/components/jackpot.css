@@ -107,3 +107,36 @@
 .jp-named .jp-title { display: none; }
 .jp-led .jp-parts .jp-amt { font-size: min(11cqmin, 7cqw) !important; }
 .jp.jp-tv, .jp.jp-tv:hover, .jp.jp-tv * { cursor: none !important; }
+
+/* ---------------- all progressives on one screen ---------------- */
+.jp-all { justify-content: center; gap: 2.2cqh; padding: 5cqh 7cqw; }
+.jp-all-head { font-size: 5cqmin; letter-spacing: .8cqmin; color: #fff; opacity: .9; margin-bottom: 1cqh; white-space: nowrap; text-shadow: 0 0 2cqmin rgba(255,160,0,.8); }
+.jp-all-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 3cqw;
+  padding: 1.2cqh 3cqw; border-left: 1.2cqmin solid var(--c); background: rgba(0,0,0,.45); border-radius: 1.5cqmin;
+  box-shadow: 0 0 3cqmin rgba(0,0,0,.6); }
+.jp-all-name { font-size: min(7cqmin, calc(100cqw / var(--alen, 26))); text-transform: uppercase; color: var(--c); letter-spacing: .3cqmin;
+  white-space: nowrap; text-align: left; text-shadow: 0 0 .6cqmin #000, 0 0 2.5cqmin var(--c); }
+.jp .jp-all-row .jp-amt { font-size: 12cqmin !important; margin: 0 !important; animation-name: none; }
+.jp-inferno .jp-all-row .jp-amt { animation: jp-molten 1.6s ease-in-out infinite alternate; }
+.jp-led .jp-all { padding-bottom: 16cqh; }
+.jp-led .jp-all-row .jp-amt { font-size: 9cqmin !important; }
+.jp-gold .jp-all-row .jp-amt::after { display: none; }
+.jp-all-row:nth-child(odd) { animation: jp-rowin .6s both .15s; } .jp-all-row:nth-child(even) { animation: jp-rowin2 .6s both .3s; }
+@keyframes jp-rowin { from { transform: translateX(-30cqw); opacity: 0; } }
+@keyframes jp-rowin2 { from { transform: translateX(30cqw); opacity: 0; } }
+
+/* ---------------- message board ---------------- */
+.jp-msg { white-space: pre-line; line-height: 1.08; text-align: center; color: var(--c); text-transform: none;
+  font-size: min(15cqmin, calc(175cqw / var(--len)), calc(72cqh / var(--lines)));
+  text-shadow: 0 0 .8cqmin #000, 0 0 3cqmin var(--c), 0 0 7cqmin var(--c); animation: jp-pulse 1.6s ease-in-out infinite; }
+.jp-led .jp-msg, .jp-gold .jp-msg { font-size: min(12cqmin, calc(120cqw / var(--len)), calc(60cqh / var(--lines))); }
+.jp-led .jp-stage:has(.jp-msg) { padding-bottom: 14cqh; }
+
+/* ---------------- art ---------------- */
+.jp-art { position: absolute; inset: 0; z-index: 7; background: #000; animation: jp-artin .7s ease-out both; }
+.jp-art img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.jp-art-img { object-fit: contain; }
+.jp-art-fill .jp-art-img { object-fit: cover; }
+.jp-art-bg { object-fit: cover; filter: blur(4cqmin) brightness(.45); transform: scale(1.15); }
+@keyframes jp-artin { from { opacity: 0; transform: scale(1.06); } }
+.jp-showing-art .jp-dots { z-index: 9; }

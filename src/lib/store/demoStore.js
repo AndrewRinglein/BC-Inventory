@@ -582,6 +582,13 @@ export class DemoStore {
   }
   async getEmails(hallId) { return this.db.emails.filter((e) => e.hall_id === hallId); }
 
+  // ---- TV art: kept in this browser as a data URL ----
+  async uploadArt(blob) {
+    const url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+    return { path: null, url };
+  }
+  async deleteArt() {}
+
   // ---- settings / events ----
   async getSetting(key) { return this.db.settings[key]; }
   async setSetting(key, value) { this.db.settings[key] = value; this._save(); }

@@ -554,3 +554,25 @@ test('progressive: old one-pot shape still reads', () => {
   const p = normalize({ id: 'x', name: 'X', game_ids: ['G012'], per_box: 50, seed: 100, adjust: 5, reset_at: null });
   assert.equal(progAmount(p, [sold('G012', '2026-10-01T00:00:00Z')], PG), 155);
 });
+
+// ---- TV rotation ----
+import { defaultPlaylist, buildSlides, missingScreens, cycleSeconds } from '../src/lib/logic/tv.js';
+test('tv: starts as each progressive for 6s, then all together for 6s', () => {
+  const ps = defaultProgressives(PG);
+  const pl = defaultPlaylist(ps);
+  assert.deepEqual(pl.map((s) => [s.type, s.prog_id || '', s.seconds]),
+    [['progressive', 'flashboard', 6], ['progressive', 'derby', 6], ['progressive', 'freedom', 6], ['all', '', 6]]);
+  assert.equal(cycleSeconds(pl), 24);
+  assert.deepEqual(missingScreens(pl, ps), []);
+});
+test('tv: messages and art join the rotation; off screens are skipped; Freedom counts once on the all screen', () => {
+  const ps = defaultProgressives(PG);
+  const pl = [...defaultPlaylist(ps), { id: 'm', type: 'message', text: 'Hello, welcome to Bingo', seconds: 4 },
+    { id: 'a', type: 'art', url: 'x.webp', seconds: 6 }, { id: 'm2', type: 'message', text: 'off', seconds: 5, enabled: false }];
+  const { slides } = buildSlides(pl, ps, [sold('G033', '2026-10-01T00:00:00Z')], PG);
+  assert.deepEqual(slides.map((s) => [s.type, s.seconds]), [['progressive', 6], ['progressive', 6], ['progressive', 6], ['all', 6], ['message', 4], ['art', 6]]);
+  const all = slides.find((s) => s.type === 'all');
+  assert.equal(all.items.length, 3);
+  assert.equal(all.items[2].amount, 350);
+  assert.equal(cycleSeconds(pl), 34);
+});

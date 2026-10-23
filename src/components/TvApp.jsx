@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { store } from '../lib/store/index.js';
 import { HALL_ID } from '../lib/roles.js';
-import { defaultProgressives, normalize, displayItem } from '../lib/logic/progressive.js';
+import { defaultProgressives, normalize } from '../lib/logic/progressive.js';
+import { playlistOf, buildSlides } from '../lib/logic/tv.js';
 import JackpotDisplay from './JackpotDisplay.jsx';
 import Login from './Login.jsx';
 
 /**
- * The hall TV — open the app with ?tv on the computer plugged into the TV by HDMI.
- * No sidebar, no buttons: it shows the progressives in whatever look Progressives →
- * "TV default" is set to, and keeps itself going unattended:
- *  - amounts, the look and the seconds-per-progressive refresh every 30 seconds
+ * The hall TV as its own page (?tv) — the same rotation Show on TV plays, for a computer
+ * that only ever drives the TV. No sidebar, no buttons: it plays the TV rotation in the
+ * TV default look, and keeps itself going unattended:
+ *  - amounts, the look and the rotation refresh every 30 seconds
  *  - a dropped connection keeps the last numbers on screen and retries
  *  - the screen is kept awake; the page reloads itself when a new version is published
  *    and once a night for a clean start
@@ -19,7 +20,7 @@ const REFRESH_MS = 30 * 1000;
 export default function TvApp() {
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState(null);
-  const [data, setData] = useState(null);        // { items, look, seconds }
+  const [data, setData] = useState(null);        // { slides, items, look }
   const [offline, setOffline] = useState(false);
 
   useEffect(() => {
@@ -28,14 +29,12 @@ export default function TvApp() {
 
   const load = useCallback(async () => {
     try {
-      const [products, boxes, saved, disp] = await Promise.all([
+      const [products, boxes, saved, disp, pl] = await Promise.all([
         store.getProducts(), store.getBoxes(HALL_ID), store.getSetting('progressives'), store.getSetting('progressive_display'),
+        store.getSetting('tv_playlist'),
       ]);
       const list = (Array.isArray(saved) ? saved : defaultProgressives(products)).map(normalize);
-      setData({
-        items: list.map((p) => displayItem(p, boxes, products)),
-        look: disp?.look || 'inferno', seconds: disp?.seconds || 10,
-      });
+      setData({ ...buildSlides(playlistOf(pl, list), list, boxes, products), look: disp?.look || 'inferno' });
       setOffline(false);
     } catch {
       setOffline(true);            // keep showing the last numbers
@@ -88,7 +87,7 @@ export default function TvApp() {
 
   return (
     <>
-      <JackpotDisplay items={data.items} look={data.look} seconds={data.seconds} tv />
+      <JackpotDisplay slides={data.slides} items={data.items} look={data.look} tv />
       {offline && (
         <div style={{ position: 'fixed', right: 12, bottom: 10, zIndex: 10000, width: 10, height: 10, borderRadius: '50%', background: '#c33', opacity: 0.7 }}
           title="Can't reach the server — showing the last amounts and retrying" />

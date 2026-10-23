@@ -1,25 +1,42 @@
-import React, { useContext, useEffect, useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppCtx } from '../App.jsx';
 import JackpotDisplay, { LOOKS } from './JackpotDisplay.jsx';
 import {
-  defaultProgressives, normalize, partAmount, progAmount, feedingBoxes, displayItem, hit, fmtJackpot, PALETTE, colorFor,
+  defaultProgressives, normalize, partAmount, progAmount, feedingBoxes, hit, fmtJackpot, PALETTE, colorFor,
 } from '../lib/logic/progressive.js';
+import {
+  playlistOf, buildSlides, missingScreens, screenLabel, cycleSeconds, prepareArt, MESSAGE_COLORS, DEFAULT_SECONDS,
+} from '../lib/logic/tv.js';
 
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
+const newId = (p) => p + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+
+/** Full screen on the TV: the screen that isn't this one when the browser can tell, otherwise this one. */
+async function pickTvScreen() {
+  try {
+    if (!('getScreenDetails' in window)) return null;
+    const d = await window.getScreenDetails();
+    return d.screens.find((s) => s !== d.currentScreen && !s.isInternal) || d.screens.find((s) => s !== d.currentScreen) || null;
+  } catch { return null; }
+}
 
 export default function Progressives() {
   const { store, settings, reloadSettings, reloadHall, products, boxes, setToast, can } = useContext(AppCtx);
   const saved = settings.progressives;
   const list = useMemo(() => (Array.isArray(saved) ? saved : defaultProgressives(products)).map(normalize), [saved, products]);
-  const disp = { look: 'inferno', seconds: 10, ...(settings.progressive_display || {}) };
+  const playlist = useMemo(() => playlistOf(settings.tv_playlist, list), [settings.tv_playlist, list]);
+  const disp = { look: 'inferno', ...(settings.progressive_display || {}) };
   const [editing, setEditing] = useState(null);      // a progressive, or {} for new
   const [hitting, setHitting] = useState(null);
-  const [showing, setShowing] = useState(null);      // look id while full screen
+  const [showing, setShowing] = useState(null);      // look id while on the TV
+  const [needClick, setNeedClick] = useState(false);
+  const tvScreen = useRef(null);
   const mayEdit = can('settings');
   const mayHit = can('boxes');
+  const mayRotate = can('boxes');
   const gameName = (id) => products.find((g) => g.id === id)?.name || id;
 
-  const items = list.map((p) => displayItem(p, boxes, products));
+  const { slides, items } = buildSlides(playlist, list, boxes, products);
   const total = items.reduce((s, x) => s + x.amount, 0);
 
   const saveList = async (next, msg, undo) => {
@@ -32,29 +49,53 @@ export default function Progressives() {
     await store.setSetting('progressive_display', { ...disp, ...patch });
     await reloadSettings();
   };
+  const savePlaylist = async (next, msg) => {
+    await store.setSetting('tv_playlist', next);
+    await reloadSettings();
+    if (msg) setToast(msg);
+  };
 
-  // full screen: keep the numbers fresh while the TV runs all night
+  // on the TV: keep amounts and the rotation fresh while it runs all night
   useEffect(() => {
     if (!showing) return undefined;
-    const t = setInterval(() => { reloadHall().catch(() => {}); }, 60000);
-    return () => clearInterval(t);
-  }, [showing, reloadHall]);
-  const goFull = async (look) => {
-    if (look !== disp.look && mayEdit) saveDisp({ look }).catch(() => {});
-    setShowing(look);
-    try { await document.documentElement.requestFullscreen?.(); } catch { /* not allowed — the overlay still covers the window */ }
+    const t = setInterval(() => { reloadHall().catch(() => {}); reloadSettings().catch(() => {}); }, 30000);
+    let lock = null;
+    navigator.wakeLock?.request('screen').then((l) => { lock = l; }).catch(() => {});
+    return () => { clearInterval(t); lock?.release?.().catch(() => {}); };
+  }, [showing, reloadHall, reloadSettings]);
+  const fullscreen = async () => {
+    try {
+      await document.documentElement.requestFullscreen(tvScreen.current ? { screen: tvScreen.current } : undefined);
+      setNeedClick(false);
+    } catch { setNeedClick(true); }
   };
-  const exitFull = () => {
-    setShowing(null);
+  const showOnTv = async (look) => {
+    setShowing(look);
+    tvScreen.current = await pickTvScreen();
+    await fullscreen();
+  };
+  const exitTv = () => {
+    setShowing(null); setNeedClick(false);
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
   };
   useEffect(() => {
-    const onFs = () => { if (!document.fullscreenElement) setShowing(null); };
+    const onFs = () => { if (!document.fullscreenElement && !needClick) setShowing(null); };
     document.addEventListener('fullscreenchange', onFs);
     return () => document.removeEventListener('fullscreenchange', onFs);
-  }, []);
+  }, [needClick]);
 
-  if (showing) return <JackpotDisplay items={items} look={showing} seconds={disp.seconds} onExit={exitFull} />;
+  if (showing) {
+    return (
+      <>
+        <JackpotDisplay slides={slides} items={items} look={showing} onExit={exitTv} />
+        {needClick && (
+          <div onClick={fullscreen} style={{ position: 'fixed', inset: 0, zIndex: 10001, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.55)', cursor: 'pointer' }}>
+            <div style={{ background: '#fff', color: '#111', padding: '18px 26px', borderRadius: 10, fontSize: 18, fontWeight: 600 }}>Click to go full screen on the TV</div>
+          </div>
+        )}
+      </>
+    );
+  }
 
   const recordHit = async (prog, partIds) => {
     const before = saved ?? null;
@@ -73,13 +114,13 @@ export default function Progressives() {
         <div className="h1">Progressive Jackpots</div>
         <div className="grow" />
         {mayEdit && <button className="btn ghost" onClick={() => setEditing({})}>+ Add progressive</button>}
-        <button className="btn primary" disabled={!items.length} onClick={() => goFull(disp.look)}>▶ Start TV display</button>
+        <button className="btn primary" disabled={!slides.length} onClick={() => showOnTv(disp.look)}>📺 Show on TV</button>
       </div>
 
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
         <div className="card pad stat"><label>Progressives</label><div className="v">{items.length}</div><div className="s">{Array.isArray(saved) ? 'saved' : 'BC defaults — not edited yet'}</div></div>
         <div className="card pad stat"><label>Total up for grabs</label><div className="v">{fmtJackpot(total)}</div><div className="s">all progressives together</div></div>
-        <div className="card pad stat"><label>TV display</label><div className="v" style={{ fontSize: 18 }}>{LOOKS.find((l) => l.id === disp.look)?.name}</div><div className="s">each progressive {disp.seconds}s</div></div>
+        <div className="card pad stat"><label>TV</label><div className="v" style={{ fontSize: 18 }}>{LOOKS.find((l) => l.id === disp.look)?.name}</div><div className="s">{slides.length} screens · {cycleSeconds(playlist)}s rotation</div></div>
       </div>
 
       {!items.length && (
@@ -131,38 +172,41 @@ export default function Progressives() {
         })}
       </div>
 
-      <div className="page-head" style={{ marginBottom: 6 }}>
-        <div className="h1" style={{ fontSize: 16 }}>TV display looks</div>
-        <div className="grow" />
-        <label className="dim" style={{ fontSize: 13 }}>Each progressive on screen for&nbsp;
-          <select value={disp.seconds} disabled={!mayEdit} onChange={(e) => saveDisp({ seconds: Number(e.target.value) })}>
-            {[5, 8, 10, 15, 20, 30].map((s) => <option key={s} value={s}>{s} seconds</option>)}
-          </select>
-        </label>
+      <Rotation playlist={playlist} list={list} look={disp.look} may={mayRotate} onSave={savePlaylist} />
+
+      <div className="page-head" style={{ marginBottom: 6, marginTop: 26 }}>
+        <div className="h1" style={{ fontSize: 16 }}>TV looks</div>
       </div>
       <p className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
-        Live previews with your real progressives. Pick one and press Show to fill the screen — put this page on the hall TV.
-        On the TV: Esc or double-click to leave, arrow keys to step through.
+        Live previews playing the rotation above. The <b>TV default</b> is what Show on TV uses.
       </p>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 16 }}>
         {LOOKS.map((l, k) => (
           <div key={l.id} className="card" style={{ overflow: 'hidden', outline: disp.look === l.id ? '3px solid var(--teal)' : 'none' }}>
             <div style={{ aspectRatio: '16 / 9', background: '#000' }}>
-              <JackpotDisplay items={items} look={l.id} seconds={disp.seconds} preview startAt={k} />
+              <JackpotDisplay slides={slides} items={items} look={l.id} preview startAt={k} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px' }}>
               <div style={{ flex: 1 }}>
                 <b>{l.name}</b>{disp.look === l.id && <span className="badge b-teal" style={{ marginLeft: 8 }}>TV default</span>}
                 <div className="dim" style={{ fontSize: 12 }}>{l.blurb}</div>
               </div>
-              {mayEdit && disp.look !== l.id && <button className="btn ghost sm" onClick={() => saveDisp({ look: l.id })}>Use on TV</button>}
-              <button className="btn primary sm" disabled={!items.length} onClick={() => goFull(l.id)}>▶ Show</button>
+              {mayEdit && disp.look !== l.id && <button className="btn ghost sm" onClick={() => saveDisp({ look: l.id })}>Make TV default</button>}
+              <button className="btn ghost sm" disabled={!slides.length} onClick={() => showOnTv(l.id)}>📺 Try on TV</button>
             </div>
           </div>
         ))}
       </div>
 
-      <TvSetup look={LOOKS.find((l) => l.id === disp.look)?.name} setToast={setToast} />
+      <div className="card pad" style={{ marginTop: 18, display: 'flex', gap: 16, alignItems: 'center' }}>
+        <div style={{ flex: 1 }}>
+          <b>Hall TV</b>
+          <div className="dim" style={{ fontSize: 13 }}>
+            With the TV plugged into this computer, press <b>Show on TV</b>. The rotation plays full screen on the TV and keeps itself up to date. Press Esc to stop.
+          </div>
+        </div>
+        <button className="btn primary" disabled={!slides.length} onClick={() => showOnTv(disp.look)}>📺 Show on TV</button>
+      </div>
 
       {editing && (
         <EditModal prog={editing} list={list} products={products}
@@ -175,6 +219,207 @@ export default function Progressives() {
           onDelete={async (p) => { await saveList(list.filter((x) => x.id !== p.id), `${p.name} removed`); setEditing(null); }} />
       )}
       {hitting && <HitModal prog={hitting} boxes={boxes} products={products} onHit={recordHit} onClose={() => setHitting(null)} />}
+    </div>
+  );
+}
+
+/** The TV rotation: every screen in order, with its own seconds. */
+function Rotation({ playlist, list, look, may, onSave }) {
+  const { store, setToast } = useContext(AppCtx);
+  const [msg, setMsg] = useState(null);   // a message screen being added/edited
+  const [art, setArt] = useState(null);   // an art screen being added/edited
+  const missing = missingScreens(playlist, list);
+  const put = (next, toast) => onSave(next, toast).catch((e) => setToast('Could not save: ' + e.message, null, 6000));
+  const update = (id, patch) => put(playlist.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  const move = (i, d) => {
+    const j = i + d; if (j < 0 || j >= playlist.length) return;
+    const next = [...playlist]; [next[i], next[j]] = [next[j], next[i]]; put(next);
+  };
+  const remove = async (s) => {
+    await put(playlist.filter((x) => x.id !== s.id), `${screenLabel(s, list)} taken out of the rotation`);
+    if (s.type === 'art' && s.path) store.deleteArt(s.path).catch(() => {});
+  };
+  const upsert = (s) => put(playlist.some((x) => x.id === s.id) ? playlist.map((x) => (x.id === s.id ? s : x)) : [...playlist, s], 'Rotation saved');
+  const kind = { progressive: 'Progressive', all: 'All together', message: 'Message', art: 'Art' };
+
+  return (
+    <div className="card" style={{ marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px 8px' }}>
+        <div style={{ flex: 1 }}>
+          <b style={{ fontSize: 15 }}>TV rotation</b>
+          <div className="dim" style={{ fontSize: 12.5 }}>The screens the TV plays, top to bottom, then starts over. Full rotation: <b>{cycleSeconds(playlist)} seconds</b>.</div>
+        </div>
+        {may && <button className="btn ghost sm" onClick={() => setMsg({})}>+ Message</button>}
+        {may && <button className="btn ghost sm" onClick={() => setArt({})}>+ Art</button>}
+      </div>
+      <table className="tbl">
+        <thead><tr>
+          <th className="first" style={{ width: 54 }}>Show</th><th>Screen</th><th style={{ width: 110 }}>Type</th><th className="r" style={{ width: 120 }}>Seconds</th><th className="last" style={{ width: 210 }} />
+        </tr></thead>
+        <tbody>
+          {playlist.map((s, i) => (
+            <tr key={s.id} style={{ opacity: s.enabled === false ? 0.45 : 1 }}>
+              <td className="first"><input type="checkbox" disabled={!may} checked={s.enabled !== false} onChange={(e) => update(s.id, { enabled: e.target.checked })} /></td>
+              <td style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 40 }}>
+                {s.type === 'art' && s.url && <img src={s.url} alt="" style={{ width: 48, height: 27, objectFit: 'cover', borderRadius: 3, background: '#000' }} />}
+                {s.type === 'message' && <span style={{ width: 12, height: 12, borderRadius: '50%', background: s.color || MESSAGE_COLORS[0], border: '1px solid rgba(0,0,0,.25)' }} />}
+                {s.type === 'progressive' && <span style={{ width: 12, height: 12, borderRadius: '50%', background: list.find((p) => p.id === s.prog_id)?.color || '#999', border: '1px solid rgba(0,0,0,.25)' }} />}
+                <span>{screenLabel(s, list)}</span>
+              </td>
+              <td className="dim">{kind[s.type]}</td>
+              <td className="r"><Seconds value={s.seconds} disabled={!may} onChange={(v) => update(s.id, { seconds: v })} /></td>
+              <td className="last r" style={{ whiteSpace: 'nowrap' }}>
+                {may && <>
+                  <button className="btn ghost sm" disabled={i === 0} onClick={() => move(i, -1)} title="Earlier">↑</button>{' '}
+                  <button className="btn ghost sm" disabled={i === playlist.length - 1} onClick={() => move(i, 1)} title="Later">↓</button>{' '}
+                  {(s.type === 'message' || s.type === 'art') && <><button className="btn ghost sm" onClick={() => (s.type === 'message' ? setMsg(s) : setArt(s))}>Edit</button>{' '}</>}
+                  <button className="btn ghost sm" onClick={() => remove(s)} title="Take out of the rotation">Remove</button>
+                </>}
+              </td>
+            </tr>
+          ))}
+          {!playlist.length && <tr><td colSpan={5} className="first dim" style={{ padding: 14 }}>Nothing in the rotation.</td></tr>}
+        </tbody>
+      </table>
+      {may && missing.length > 0 && (
+        <div style={{ padding: '10px 16px', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="dim" style={{ fontSize: 12.5 }}>Add back:</span>
+          {missing.map((m) => {
+            const { label, ...screen } = m;
+            return <button key={m.id} className="btn ghost sm" onClick={() => put([...playlist, screen], `${label} added to the rotation`)}>+ {label}</button>;
+          })}
+        </div>
+      )}
+      <div style={{ height: 6 }} />
+      {msg && <MessageModal screen={msg} look={look} onClose={() => setMsg(null)} onSave={async (s) => { await upsert(s); setMsg(null); }} />}
+      {art && <ArtModal screen={art} look={look} onClose={() => setArt(null)} onSave={async (s) => { await upsert(s); setArt(null); }} />}
+    </div>
+  );
+}
+
+/** Seconds box that saves when you leave it (or press Enter), not on every keystroke. */
+function Seconds({ value, disabled, onChange }) {
+  const [v, setV] = useState(String(value ?? DEFAULT_SECONDS));
+  useEffect(() => { setV(String(value ?? DEFAULT_SECONDS)); }, [value]);
+  const commit = () => {
+    const n = Math.max(2, Math.min(600, Math.round(Number(v)) || DEFAULT_SECONDS));
+    setV(String(n));
+    if (n !== Number(value)) onChange(n);
+  };
+  return (
+    <input type="number" min="2" max="600" className="num" style={{ width: 70 }} disabled={disabled} value={v}
+      onChange={(e) => setV(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }} />
+  );
+}
+
+function MessageModal({ screen, look, onSave, onClose }) {
+  const [text, setText] = useState(screen.text || '');
+  const [color, setColor] = useState(screen.color || MESSAGE_COLORS[0]);
+  const [seconds, setSeconds] = useState(screen.seconds ?? 4);
+  const preview = [{ key: 'm', type: 'message', seconds: 999, text: text.trim() || 'Your message', color }];
+  const save = (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    onSave({ enabled: true, ...screen, id: screen.id || newId('msg'), type: 'message', text: text.trim(), color, seconds: Math.max(2, Number(seconds) || 4) });
+  };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <form className="modal" style={{ width: 620 }} onClick={(e) => e.stopPropagation()} onSubmit={save}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 12 }}>{screen.id ? 'Edit message' : 'Add a message to the TV'}</div>
+        <div style={{ aspectRatio: '16 / 9', background: '#000', borderRadius: 6, overflow: 'hidden', marginBottom: 12 }}>
+          <JackpotDisplay slides={preview} look={look} preview />
+        </div>
+        <div className="field"><label>Message (Enter for a new line)</label>
+          <textarea autoFocus rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="Hello, welcome to Bingo!" style={{ width: '100%', fontSize: 15 }} /></div>
+        <div style={{ display: 'flex', gap: 18, alignItems: 'flex-end' }}>
+          <div className="field" style={{ margin: 0 }}><label>Colour</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {MESSAGE_COLORS.map((c) => (
+                <button type="button" key={c} onClick={() => setColor(c)} title={c}
+                  style={{ width: 24, height: 24, borderRadius: '50%', background: c, cursor: 'pointer', border: color === c ? '3px solid var(--ink)' : '1px solid rgba(0,0,0,.25)' }} />
+              ))}
+            </div>
+          </div>
+          <div className="field" style={{ margin: 0 }}><label>Seconds on screen</label>
+            <input type="number" min="2" max="600" className="num" style={{ width: 80 }} value={seconds} onChange={(e) => setSeconds(e.target.value)} /></div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <button className="btn primary" type="submit" disabled={!text.trim()}>{screen.id ? 'Save' : 'Add to rotation'}</button>
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ArtModal({ screen, look, onSave, onClose }) {
+  const { store, setToast } = useContext(AppCtx);
+  const [file, setFile] = useState(null);
+  const [localUrl, setLocalUrl] = useState(null);
+  const [name, setName] = useState(screen.name || '');
+  const [fit, setFit] = useState(screen.fit || 'fit');
+  const [seconds, setSeconds] = useState(screen.seconds ?? DEFAULT_SECONDS);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => () => { if (localUrl) URL.revokeObjectURL(localUrl); }, [localUrl]);
+  const pick = (f) => {
+    if (!f) return;
+    if (!/^image\//.test(f.type)) { setToast('That isn\'t a picture — choose a JPG, PNG, GIF or WebP'); return; }
+    setFile(f); setLocalUrl(URL.createObjectURL(f));
+    if (!name) setName(f.name.replace(/\.[^.]+$/, ''));
+  };
+  const shown = localUrl || screen.url;
+  const preview = shown ? [{ key: 'a', type: 'art', seconds: 999, url: shown, fit }] : [];
+  const save = async (e) => {
+    e.preventDefault();
+    if (!shown || busy) return;
+    setBusy(true);
+    try {
+      let { url, path } = screen;
+      if (file) {
+        const ready = await prepareArt(file);
+        ({ url, path } = await store.uploadArt(ready.blob, ready.ext, ready.type));
+        if (screen.path) store.deleteArt(screen.path).catch(() => {});
+      }
+      await onSave({ enabled: true, ...screen, id: screen.id || newId('art'), type: 'art', url, path: path || null, name: name.trim() || 'Picture', fit, seconds: Math.max(2, Number(seconds) || DEFAULT_SECONDS) });
+    } catch (err) {
+      setToast('Could not upload the picture: ' + err.message, null, 7000);
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-bg" onClick={() => !busy && onClose()}>
+      <form className="modal" style={{ width: 620 }} onClick={(e) => e.stopPropagation()} onSubmit={save}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 12 }}>{screen.id ? 'Edit art' : 'Add art to the TV'}</div>
+        <label onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); pick(e.dataTransfer.files?.[0]); }}
+          style={{ display: 'block', aspectRatio: '16 / 9', background: '#000', borderRadius: 6, overflow: 'hidden', marginBottom: 12, cursor: 'pointer', position: 'relative' }}>
+          {shown
+            ? <JackpotDisplay slides={preview} look={look} preview />
+            : <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#ddd', gap: 6 }}>
+                <div style={{ fontSize: 34 }}>🖼️</div><b>Click to choose a picture</b><span style={{ fontSize: 12, opacity: .7 }}>or drag one here · JPG, PNG, GIF, WebP</span>
+              </div>}
+          <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => pick(e.target.files?.[0])} />
+        </label>
+        {shown && <div style={{ marginTop: -6, marginBottom: 10 }}>
+          <label className="btn ghost sm" style={{ cursor: 'pointer' }}>Choose a different picture
+            <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => pick(e.target.files?.[0])} /></label>
+        </div>}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 14, alignItems: 'end' }}>
+          <div className="field" style={{ margin: 0 }}><label>Name (just for this list)</label>
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} style={{ width: '100%' }} /></div>
+          <div className="field" style={{ margin: 0 }}><label>On the TV</label>
+            <select value={fit} onChange={(e) => setFit(e.target.value)}>
+              <option value="fit">Whole picture</option>
+              <option value="fill">Fill the screen (may crop)</option>
+            </select></div>
+          <div className="field" style={{ margin: 0 }}><label>Seconds</label>
+            <input type="number" min="2" max="600" className="num" style={{ width: 80 }} value={seconds} onChange={(e) => setSeconds(e.target.value)} /></div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <button className="btn primary" type="submit" disabled={!shown || busy}>{busy ? 'Uploading…' : screen.id ? 'Save' : 'Add to rotation'}</button>
+          <div style={{ flex: 1 }} />
+          <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Cancel</button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -329,58 +574,3 @@ function EditModal({ prog, list, products, onSave, onDelete, onClose }) {
 }
 
 /** The TV link and a one-click launcher for the computer plugged into the TV. */
-function TvSetup({ look, setToast }) {
-  const u = new URL(window.location.href);
-  const keep = u.searchParams.has('demo') ? '&demo' : '';
-  const link = `${u.origin}${u.pathname}?tv${keep}`;
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(link); setToast('TV link copied'); } catch { setToast('Copy failed — select the link and copy it'); }
-  };
-  const launcher = () => {
-    const chrome = '%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe';
-    const bat = [
-      '@echo off',
-      'REM BC Inventory - progressive jackpot TV. Opens the TV display full screen on the screen it starts on.',
-      'REM To leave it: press Alt+F4.  To start it with the computer: put this file (or a shortcut) in',
-      'REM   Win+R  ->  shell:startup',
-      `set "URL=${link}"`,
-      'set "CHROME="',
-      `if not exist "${chrome}" set "CHROME=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"`,
-      `if exist "${chrome}" set "CHROME=${chrome}"`,
-      'if exist "%CHROME%" (',
-      `  start "" "%CHROME%" --kiosk --no-first-run --disable-session-crashed-bubble --disable-features=Translate "%URL%"`,
-      ') else (',
-      '  start "" msedge --start-fullscreen --no-first-run --app="%URL%"',
-      ')',
-      '',
-    ].join('\r\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([bat], { type: 'application/octet-stream' }));
-    a.download = 'BC Jackpot TV.bat';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  };
-  return (
-    <div className="card pad" style={{ marginTop: 18 }}>
-      <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Hall TV (HDMI)</div>
-      <p className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
-        The TV shows the <b>TV default</b> look ({look}), full screen, with nothing else on it. Change the default above and the
-        TV switches within 30 seconds; amounts update as boxes sell out.
-      </p>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-        <input type="text" readOnly value={link} className="mono" style={{ flex: 1, minWidth: 260 }} onFocus={(e) => e.target.select()} />
-        <button className="btn ghost sm" onClick={copy}>Copy link</button>
-        <a className="btn ghost sm" href={link} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>Open TV view</a>
-        <button className="btn primary sm" onClick={launcher}>Download TV launcher (Windows)</button>
-      </div>
-      <ol className="dim" style={{ fontSize: 12.5, lineHeight: 1.7, paddingLeft: 18 }}>
-        <li>Plug the computer into the TV with HDMI. In Windows display settings (Win+P), choose <b>Second screen only</b> — or
-          <b> Duplicate</b> if you want the same picture on both.</li>
-        <li>On that computer, open the TV link once and sign in. It stays signed in after that.</li>
-        <li>Run <b>BC Jackpot TV.bat</b>: the display opens full screen with no browser bars or cursor. Alt+F4 closes it.</li>
-        <li>To start it automatically when the computer turns on, press Win+R, type <span className="mono">shell:startup</span>, and put the .bat file in that folder.
-          Also set Windows Power &amp; sleep to <b>Never</b> so the screen stays on.</li>
-      </ol>
-    </div>
-  );
-}

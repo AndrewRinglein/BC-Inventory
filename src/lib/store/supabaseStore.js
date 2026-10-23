@@ -629,6 +629,19 @@ export class SupabaseStore {
   }
   async getEmails(hallId) { return fetchAll(() => this.sb.from('emails').select('*').eq('hall_id', hallId).order('created_at', { ascending: false })); }
 
+  // ---- TV art (Storage bucket 'tv-art', publicly readable so the TV can show it) ----
+  async uploadArt(blob, ext, type) {
+    const path = `${new Date().toISOString().slice(0, 10)}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${ext}`;
+    const { error } = await this.sb.storage.from('tv-art').upload(path, blob, { contentType: type, cacheControl: '31536000', upsert: false });
+    if (error) throw new Error(error.message);
+    return { path, url: this.sb.storage.from('tv-art').getPublicUrl(path).data.publicUrl };
+  }
+  async deleteArt(path) {
+    if (!path) return;
+    const { error } = await this.sb.storage.from('tv-art').remove([path]);
+    if (error) throw new Error(error.message);
+  }
+
   // ---- settings / events ----
   async getSetting(key) {
     const rows = ok(await this.sb.from('settings').select('value').eq('key', key));

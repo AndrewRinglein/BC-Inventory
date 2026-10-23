@@ -15,15 +15,29 @@ export const LOOKS = [
   { id: 'led', name: 'LED Board', blurb: 'Amber dot-matrix sign with a scrolling ticker.' },
 ];
 
-export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, preview = false, startAt = 0, onExit, tv = false }) {
-  const [i, setI] = useState(startAt % Math.max(items.length, 1));
-  const n = items.length;
+const LOOK_TEXT = {
+  inferno: { title: 'PROGRESSIVE JACKPOT', sub: '🔥 GROWING EVERY BOX 🔥', all: '🔥 PROGRESSIVE JACKPOTS 🔥' },
+  marquee: { title: '★ PROGRESSIVE JACKPOT ★', sub: 'PROGRESSIVE · PLAY NOW', all: '★ PROGRESSIVE JACKPOTS ★' },
+  gold: { title: 'PROGRESSIVE JACKPOT', sub: '◆ IT COULD BE YOU ◆', all: 'PROGRESSIVE JACKPOTS' },
+  led: { title: '● PROGRESSIVE ●', sub: null, all: '● PROGRESSIVE JACKPOTS ●' },
+};
+
+/**
+ * The hall TV. Plays a list of screens, each for its own seconds:
+ *   slides  [{ key, type:'progressive', seconds, item } | { type:'all', items } | { type:'message', text, color } | { type:'art', url, fit }]
+ *   items   every progressive (for the LED ticker)
+ * Sized in container units, so it renders the same as a preview tile or the whole TV.
+ */
+export default function JackpotDisplay({ slides, items = [], look = 'inferno', preview = false, startAt = 0, onExit, tv = false }) {
+  const n = slides.length;
+  const [i, setI] = useState(startAt % Math.max(n, 1));
+  const idx = n ? i % n : 0;
+  const slide = slides[idx];
   useEffect(() => {
     if (n < 2) return undefined;
-    const t = setInterval(() => setI((x) => (x + 1) % n), Math.max(3, seconds) * 1000);
-    return () => clearInterval(t);
-  }, [n, seconds]);
-  useEffect(() => { if (i >= n) setI(0); }, [n, i]);
+    const t = setTimeout(() => setI((x) => (x + 1) % n), Math.max(2, slide?.seconds || 6) * 1000);
+    return () => clearTimeout(t);
+  }, [n, idx, slide?.key, slide?.seconds]);   // eslint-disable-line
 
   useEffect(() => {
     if (preview || !onExit) return undefined;
@@ -36,21 +50,69 @@ export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, 
     return () => window.removeEventListener('keydown', k);
   }, [preview, onExit, n]);
 
-  const item = items[i] || { id: 'none', name: 'No progressives yet', color: '#ffc21a', amount: 0 };
-  const props = { item, items, index: i, preview };
+  const T = LOOK_TEXT[look] || LOOK_TEXT.inferno;
+  let color = '#ffc21a', len = 12, lines = 1, named = false;
+  if (slide?.type === 'progressive') { color = slide.item.color; len = slide.item.name.length; named = /progressive/i.test(slide.item.name); }
+  if (slide?.type === 'message') {
+    color = slide.color; const ls = String(slide.text).split('\n');
+    lines = ls.length; len = Math.max(...ls.map((l) => l.length));
+  }
+  const art = slide?.type === 'art';
+  const cls = ['jp', `jp-${look}`, preview && 'jp-preview', named && 'jp-named', tv && 'jp-tv', art && 'jp-showing-art'].filter(Boolean).join(' ');
   return (
-    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}${/progressive/i.test(item.name) ? ' jp-named' : ''}${tv ? ' jp-tv' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
-      onDoubleClick={!preview ? onExit : undefined}>
-      {look === 'inferno' && <Inferno {...props} />}
-      {look === 'marquee' && <Marquee {...props} />}
-      {look === 'gold' && <Gold {...props} />}
-      {look === 'led' && <Led {...props} />}
-      {n > 1 && (
-        <div className="jp-dots">{items.map((x, k) => <span key={x.id} className={k === i ? 'on' : ''} style={{ '--dc': x.color }} />)}</div>
+    <div className={cls} style={{ '--c': color, '--len': Math.max(len, 6), '--lines': lines }} onDoubleClick={!preview ? onExit : undefined}>
+      <Backdrop look={look} items={items} />
+      {!slide && <div className="jp-stage"><div className="jp-msg">No screens in the rotation</div></div>}
+      {slide?.type === 'progressive' && (
+        <div className="jp-stage" key={slide.key}>
+          <div className="jp-title">{T.title}</div>
+          <div className="jp-name">{slide.item.name}</div>
+          <Amounts item={slide.item} />
+          {T.sub && <div className="jp-sub">{T.sub}</div>}
+        </div>
       )}
-      {!preview && onExit && <button className="jp-exit" onClick={onExit}>Exit (Esc)</button>}
+      {slide?.type === 'all' && (
+        <div className="jp-stage jp-all" key={slide.key}>
+          <div className="jp-all-head">{T.all}</div>
+          {slide.items.map((x) => (
+            <div key={x.id} className="jp-all-row" style={{ '--c': x.color }}>
+              <div className="jp-all-name">{x.name}</div>
+              <Amount item={{ id: slide.key + x.id, amount: x.amount }} />
+            </div>
+          ))}
+        </div>
+      )}
+      {slide?.type === 'message' && (
+        <div className="jp-stage" key={slide.key}>
+          <div className="jp-msg">{slide.text}</div>
+        </div>
+      )}
+      {art && (
+        <div className={'jp-art jp-art-' + slide.fit} key={slide.key}>
+          {slide.fit !== 'fill' && <img className="jp-art-bg" src={slide.url} alt="" />}
+          <img className="jp-art-img" src={slide.url} alt="" />
+        </div>
+      )}
+      {slide && <div className="jp-flash" key={'f' + slide.key + idx} />}
+      {n > 1 && (
+        <div className="jp-dots">{slides.map((x, k) => (
+          <span key={x.key} className={k === idx ? 'on' : ''} style={{ '--dc': x.type === 'progressive' ? x.item.color : x.type === 'message' ? x.color : '#fff' }} />
+        ))}</div>
+      )}
+      {!preview && onExit && !tv && <button className="jp-exit" onClick={onExit}>Exit (Esc)</button>}
     </div>
   );
+}
+
+/** The moving background of each look. It keeps running from screen to screen. */
+function Backdrop({ look, items }) {
+  if (look === 'inferno') return <><div className="jp-glow" /><FireCanvas height={0.62} /><Particles kind="embers" /></>;
+  if (look === 'marquee') return <><div className="jp-rays" /><div className="jp-vignette" /><Bulbs /><Particles kind="sparks" /></>;
+  if (look === 'gold') return <><div className="jp-rays" /><div className="jp-vignette" /><Particles kind="coins" /></>;
+  const ticker = items.map((x) => ((x.parts || []).length > 1
+    ? `${x.name.toUpperCase()}  ` + x.parts.map((p) => `${p.label.toUpperCase()} ${fmtJackpot(p.amount)}`).join('  ')
+    : `${x.name.toUpperCase()} ${fmtJackpot(x.amount)}`)).join('   ◆   ');
+  return <>{ticker && <div className="jp-ticker"><div><span>{ticker}</span><span>{ticker}</span></div></div>}<div className="jp-dotmask" /></>;
 }
 
 /** Count up to the amount each time a jackpot comes on screen, then follow it live. */
@@ -190,79 +252,8 @@ function Particles({ kind }) {
 
 // ---------- looks ----------
 
-function Inferno({ item }) {
-  return (
-    <>
-      <div className="jp-glow" />
-      <FireCanvas height={0.62} />
-      <Particles kind="embers" />
-      <div className="jp-stage" key={item.id}>
-        <div className="jp-title">
-          {'PROGRESSIVE JACKPOT'.split('').map((ch, k) => <span key={k} style={{ animationDelay: `${k * 0.06}s` }}>{ch === ' ' ? ' ' : ch}</span>)}
-        </div>
-        <div className="jp-name">{item.name}</div>
-        <Amounts item={item} />
-        <div className="jp-sub">🔥 GROWING EVERY BOX 🔥</div>
-      </div>
-      <div className="jp-flash" key={'f' + item.id} />
-    </>
-  );
-}
-
 function Bulbs() {
   const top = 22, side = 12;
   const row = (n, cls) => <div className={'jp-bulbs ' + cls}>{Array.from({ length: n }, (_, k) => <i key={k} />)}</div>;
   return <>{row(top, 'top')}{row(top, 'bottom')}{row(side, 'left')}{row(side, 'right')}</>;
-}
-
-function Marquee({ item }) {
-  return (
-    <>
-      <div className="jp-rays" />
-      <div className="jp-vignette" />
-      <Bulbs />
-      <Particles kind="sparks" />
-      <div className="jp-stage" key={item.id}>
-        <div className="jp-title">★ PROGRESSIVE JACKPOT ★</div>
-        <div className="jp-name">{item.name}</div>
-        <Amounts item={item} />
-        <div className="jp-sub">PROGRESSIVE · PLAY NOW</div>
-      </div>
-      <div className="jp-flash" key={'f' + item.id} />
-    </>
-  );
-}
-
-function Gold({ item }) {
-  return (
-    <>
-      <div className="jp-rays" />
-      <div className="jp-vignette" />
-      <Particles kind="coins" />
-      <div className="jp-stage" key={item.id}>
-        <div className="jp-title">PROGRESSIVE JACKPOT</div>
-        <div className="jp-name">{item.name}</div>
-        <Amounts item={item} />
-        <div className="jp-sub">◆ IT COULD BE YOU ◆</div>
-      </div>
-      <div className="jp-flash" key={'f' + item.id} />
-    </>
-  );
-}
-
-function Led({ item, items }) {
-  const ticker = items.map((x) => ((x.parts || []).length > 1
-    ? `${x.name.toUpperCase()}  ` + x.parts.map((p) => `${p.label.toUpperCase()} ${fmtJackpot(p.amount)}`).join('  ')
-    : `${x.name.toUpperCase()} ${fmtJackpot(x.amount)}`)).join('   ◆   ');
-  return (
-    <>
-      <div className="jp-stage" key={item.id}>
-        <div className="jp-title"><span className="blink">●</span> PROGRESSIVE <span className="blink">●</span></div>
-        <div className="jp-name">{item.name}</div>
-        <Amounts item={item} />
-      </div>
-      <div className="jp-ticker"><div><span>{ticker}</span><span>{ticker}</span></div></div>
-      <div className="jp-dotmask" />
-    </>
-  );
 }

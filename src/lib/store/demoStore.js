@@ -751,7 +751,7 @@ function seed() {
       sender: { bc: { name: '', org: '', title: '', phone: '', replyTo: '' } },
       // sample jackpots so the TV looks have something to show
       progressives: [
-        { id: 'flashboard', name: 'Flashboard Progressive', color: '#ffc21a', game_ids: ['G032', 'G034', 'G035'],
+        { id: 'flashboard', name: 'Flashboard Progressive', color: '#ffc21a', game_ids: ['G010', 'G032', 'G034', 'G035'],
           parts: [{ id: 'main', label: '', color: null, per_box: null, seed: 1000, adjust: 1850, reset_at: null, hits: [] }] },
         { id: 'derby', name: 'Jackpot Derby Progressive', color: '#22d36a', game_ids: ['G012'],
           parts: [{ id: 'main', label: '', color: null, per_box: null, seed: 500, adjust: 1200, reset_at: null, hits: [] }] },

@@ -524,7 +524,7 @@ test('one trigger pull with a space still works when a game is waiting', () => {
 
 // ---- progressive jackpots ----
 import { defaultProgressives, normalize, partAmount, progAmount, hit as hitProg, BC_PROGRESSIVES } from '../src/lib/logic/progressive.js';
-const PG = [{ id: 'G032', progressive_amount: 300 }, { id: 'G034', progressive_amount: 250 }, { id: 'G035', progressive_amount: 250 },
+const PG = [{ id: 'G010', progressive_amount: 25 }, { id: 'G032', progressive_amount: 300 }, { id: 'G034', progressive_amount: 250 }, { id: 'G035', progressive_amount: 250 },
   { id: 'G012', progressive_amount: 300 }, { id: 'G033', progressive_amount: 350 }];
 const sold = (pid, at) => ({ product_id: pid, state: 'sold_out', sold_out_at: at });
 test('progressive: BC has three — Flashboard (3 games), Jackpot Derby, Freedom Flash red/white/blue', () => {
@@ -534,8 +534,8 @@ test('progressive: BC has three — Flashboard (3 games), Jackpot Derby, Freedom
 });
 test('progressive: a shared pot adds each game\'s own amount', () => {
   const fb = defaultProgressives(PG)[0];
-  const bx = [sold('G032', '2026-10-01T01:00:00Z'), sold('G034', '2026-10-01T02:00:00Z'), { product_id: 'G032', state: 'opened' }, sold('G012', '2026-10-01T03:00:00Z')];
-  assert.equal(progAmount(fb, bx, PG), 550);
+  const bx = [sold('G032', '2026-10-01T01:00:00Z'), sold('G034', '2026-10-01T02:00:00Z'), { product_id: 'G032', state: 'opened' }, sold('G012', '2026-10-01T03:00:00Z'), sold('G010', '2026-10-01T04:00:00Z')];
+  assert.equal(progAmount(fb, bx, PG), 575);
 });
 test('progressive: Freedom parts grow per deal and pay separately or all at once', () => {
   const fr = defaultProgressives(PG)[2];

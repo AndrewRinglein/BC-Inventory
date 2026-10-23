@@ -31,7 +31,7 @@ const part = (o) => ({ id: 'main', label: '', color: null, per_box: null, seed: 
 
 /** BC's progressives, as the hall runs them. Used until someone saves their own list. */
 export const BC_PROGRESSIVES = [
-  { id: 'flashboard', name: 'Flashboard Progressive', color: '#ffc21a', game_ids: ['G032', 'G034', 'G035'], parts: [part({})] },
+  { id: 'flashboard', name: 'Flashboard Progressive', color: '#ffc21a', game_ids: ['G010', 'G032', 'G034', 'G035'], parts: [part({})] },
   { id: 'derby', name: 'Jackpot Derby Progressive', color: '#22d36a', game_ids: ['G012'], parts: [part({})] },
   {
     id: 'freedom', name: 'Freedom Flash Progressive', color: '#f4f4f4', game_ids: ['G033'], parts: [

@@ -751,9 +751,15 @@ function seed() {
       sender: { bc: { name: '', org: '', title: '', phone: '', replyTo: '' } },
       // sample jackpots so the TV looks have something to show
       progressives: [
-        { id: 'G033-red', name: 'Freedom Red', color: '#ff2a2a', seed: 500, per_box: 200, game_ids: ['G033'], reset_at: null, adjust: 1347, hits: [] },
-        { id: 'G033-white', name: 'Freedom White', color: '#f4f4f4', seed: 250, per_box: 100, game_ids: ['G033'], reset_at: null, adjust: 726, hits: [] },
-        { id: 'G033-blue', name: 'Freedom Blue', color: '#2a7bff', seed: 100, per_box: 50, game_ids: ['G033'], reset_at: null, adjust: 312, hits: [] },
+        { id: 'flashboard', name: 'Flashboard Progressive', color: '#ffc21a', game_ids: ['G032', 'G034', 'G035'],
+          parts: [{ id: 'main', label: '', color: null, per_box: null, seed: 1000, adjust: 1850, reset_at: null, hits: [] }] },
+        { id: 'derby', name: 'Jackpot Derby Progressive', color: '#22d36a', game_ids: ['G012'],
+          parts: [{ id: 'main', label: '', color: null, per_box: null, seed: 500, adjust: 1200, reset_at: null, hits: [] }] },
+        { id: 'freedom', name: 'Freedom Flash Progressive', color: '#f4f4f4', game_ids: ['G033'], parts: [
+          { id: 'red', label: 'Red', color: '#ff2a2a', per_box: 200, seed: 500, adjust: 1347, reset_at: null, hits: [] },
+          { id: 'white', label: 'White', color: '#f4f4f4', per_box: 100, seed: 250, adjust: 726, reset_at: null, hits: [] },
+          { id: 'blue', label: 'Blue', color: '#2a7bff', per_box: 50, seed: 100, adjust: 312, reset_at: null, hits: [] },
+        ] },
       ],
     },
   };

@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useMemo, useState } from 'react';
 import { AppCtx } from '../App.jsx';
 import JackpotDisplay, { LOOKS } from './JackpotDisplay.jsx';
 import {
-  defaultProgressives, currentAmount, feedingBoxes, hit, fmtJackpot, PALETTE,
+  defaultProgressives, normalize, partAmount, progAmount, feedingBoxes, displayItem, hit, fmtJackpot, PALETTE, colorFor,
 } from '../lib/logic/progressive.js';
 
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
@@ -10,22 +10,23 @@ const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString([], { month: 'short
 export default function Progressives() {
   const { store, settings, reloadSettings, reloadHall, products, boxes, setToast, can } = useContext(AppCtx);
   const saved = settings.progressives;
-  const list = useMemo(() => (Array.isArray(saved) ? saved : defaultProgressives(products)), [saved, products]);
+  const list = useMemo(() => (Array.isArray(saved) ? saved : defaultProgressives(products)).map(normalize), [saved, products]);
   const disp = { look: 'inferno', seconds: 10, ...(settings.progressive_display || {}) };
   const [editing, setEditing] = useState(null);      // a progressive, or {} for new
   const [hitting, setHitting] = useState(null);
   const [showing, setShowing] = useState(null);      // look id while full screen
   const mayEdit = can('settings');
   const mayHit = can('boxes');
+  const gameName = (id) => products.find((g) => g.id === id)?.name || id;
 
-  const items = list.map((p) => ({ id: p.id, name: p.name, color: p.color, amount: currentAmount(p, boxes) }));
+  const items = list.map((p) => displayItem(p, boxes, products));
   const total = items.reduce((s, x) => s + x.amount, 0);
 
-  const saveList = async (next, msg) => {
+  const saveList = async (next, msg, undo) => {
     await store.setSetting('progressives', next);
     await store.logEvent('catalog.progressive', 'settings', 'progressives', { label: msg });
     await reloadSettings();
-    setToast(msg);
+    setToast(msg, undo || null);
   };
   const saveDisp = async (patch) => {
     await store.setSetting('progressive_display', { ...disp, ...patch });
@@ -39,7 +40,7 @@ export default function Progressives() {
     return () => clearInterval(t);
   }, [showing, reloadHall]);
   const goFull = async (look) => {
-    if (look !== disp.look) saveDisp({ look }).catch(() => {});
+    if (look !== disp.look && mayEdit) saveDisp({ look }).catch(() => {});
     setShowing(look);
     try { await document.documentElement.requestFullscreen?.(); } catch { /* not allowed — the overlay still covers the window */ }
   };
@@ -55,6 +56,17 @@ export default function Progressives() {
 
   if (showing) return <JackpotDisplay items={items} look={showing} seconds={disp.seconds} onExit={exitFull} />;
 
+  const recordHit = async (prog, partIds) => {
+    const before = saved ?? null;
+    const p = hit(prog, partIds, boxes, products);
+    const paid = p.parts.filter((x) => partIds.includes(x.id));
+    const sum = paid.reduce((s, x) => s + x.hits[0].amount, 0);
+    const what = prog.parts.length > 1 ? `${paid.map((x) => x.label).join(' + ')} ` : '';
+    await saveList(list.map((x) => (x.id === p.id ? p : x)), `${prog.name} ${what}hit: ${fmtJackpot(sum)} recorded`,
+      async () => { await store.setSetting('progressives', before); await reloadSettings(); });
+    setHitting(null);
+  };
+
   return (
     <div>
       <div className="page-head">
@@ -65,37 +77,49 @@ export default function Progressives() {
       </div>
 
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
-        <div className="card pad stat"><label>Progressives</label><div className="v">{items.length}</div><div className="s">{Array.isArray(saved) ? 'saved' : 'from the game catalog'}</div></div>
-        <div className="card pad stat"><label>Total up for grabs</label><div className="v">{fmtJackpot(total)}</div><div className="s">all jackpots together</div></div>
-        <div className="card pad stat"><label>TV display</label><div className="v" style={{ fontSize: 18 }}>{LOOKS.find((l) => l.id === disp.look)?.name}</div><div className="s">each jackpot {disp.seconds}s</div></div>
+        <div className="card pad stat"><label>Progressives</label><div className="v">{items.length}</div><div className="s">{Array.isArray(saved) ? 'saved' : 'BC defaults — not edited yet'}</div></div>
+        <div className="card pad stat"><label>Total up for grabs</label><div className="v">{fmtJackpot(total)}</div><div className="s">all progressives together</div></div>
+        <div className="card pad stat"><label>TV display</label><div className="v" style={{ fontSize: 18 }}>{LOOKS.find((l) => l.id === disp.look)?.name}</div><div className="s">each progressive {disp.seconds}s</div></div>
       </div>
 
       {!items.length && (
-        <div className="card pad dim" style={{ marginBottom: 16 }}>
-          No game in the catalog sends money to a progressive yet. Set "Amount to progressive" on a game, or add one here.
-        </div>
+        <div className="card pad dim" style={{ marginBottom: 16 }}>No progressives yet. Add one, and pick the games that pay into it.</div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 12, marginBottom: 26 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))', gap: 12, marginBottom: 26 }}>
         {list.map((p) => {
-          const amt = currentAmount(p, boxes);
-          const n = feedingBoxes(p, boxes).length;
-          const games = (p.game_ids || []).map((id) => products.find((g) => g.id === id)?.name || id);
+          const multi = p.parts.length > 1;
           return (
             <div key={p.id} className="card" style={{ overflow: 'hidden' }}>
-              <div style={{ height: 6, background: p.color }} />
+              <div style={{ height: 6, background: multi ? `linear-gradient(90deg, ${p.parts.map((x, i) => x.color || colorFor(x.label, i)).join(',')})` : p.color }} />
               <div style={{ padding: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ width: 12, height: 12, borderRadius: '50%', background: p.color, border: '1px solid rgba(0,0,0,.2)' }} />
-                  <b style={{ fontSize: 15 }}>{p.name}</b>
-                </div>
-                <div className="mono" style={{ fontSize: 32, fontWeight: 700, margin: '8px 0 4px' }}>{fmtJackpot(amt)}</div>
+                <b style={{ fontSize: 15 }}>{p.name}</b>
+                {!multi && <div className="mono" style={{ fontSize: 32, fontWeight: 700, margin: '8px 0 4px' }}>{fmtJackpot(progAmount(p, boxes, products))}</div>}
+                {multi && (
+                  <div style={{ display: 'grid', gridTemplateColumns: `repeat(${p.parts.length}, 1fr)`, gap: 8, margin: '10px 0 6px' }}>
+                    {p.parts.map((pt, i) => (
+                      <div key={pt.id} style={{ borderLeft: `4px solid ${pt.color || colorFor(pt.label, i)}`, paddingLeft: 8 }}>
+                        <div className="dimmer" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.8px' }}>{pt.label}</div>
+                        <div className="mono" style={{ fontSize: 21, fontWeight: 700 }}>{fmtJackpot(partAmount(p, pt, boxes, products))}</div>
+                        <div className="dimmer" style={{ fontSize: 11 }}>+{fmtJackpot(pt.per_box)}/deal</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-                  {fmtJackpot(p.per_box)} per box sold out · {n} box{n === 1 ? '' : 'es'} since {p.reset_at ? 'last hit' : 'start'}<br />
-                  {Number(p.seed) ? <>Starts at {fmtJackpot(p.seed)} · </> : null}
-                  {Number(p.adjust) ? <>Adjusted {Number(p.adjust) > 0 ? '+' : ''}{fmtJackpot(p.adjust)} · </> : null}
-                  Fed by {games.join(', ') || 'no games'}<br />
-                  Last hit: {p.hits?.[0] ? <>{fmtJackpot(p.hits[0].amount)} on {fmtDate(p.hits[0].at)}</> : 'never'}
+                  {!multi && (() => {
+                    const pt = p.parts[0];
+                    const n = feedingBoxes(p, pt, boxes).length;
+                    const per = pt.per_box != null && pt.per_box !== ''
+                      ? `${fmtJackpot(pt.per_box)} per deal`
+                      : p.game_ids.map((g) => `${gameName(g)} ${fmtJackpot(products.find((x) => x.id === g)?.progressive_amount)}`).join(' · ') + ' per deal';
+                    return <>{per}<br />{n} deal{n === 1 ? '' : 's'} sold out since {pt.reset_at ? 'last hit' : 'start'}<br /></>;
+                  })()}
+                  Fed by {p.game_ids.map(gameName).join(', ') || 'no games'}<br />
+                  Last hit: {(() => {
+                    const last = p.parts.flatMap((pt) => (pt.hits || []).map((h) => ({ ...h, label: pt.label }))).sort((a, b) => b.at.localeCompare(a.at))[0];
+                    return last ? <>{multi && last.label ? `${last.together ? 'all' : last.label} · ` : ''}{fmtJackpot(last.amount)} on {fmtDate(last.at)}</> : 'never';
+                  })()}
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                   {mayHit && <button className="btn primary sm" onClick={() => setHitting(p)}>Jackpot hit</button>}
@@ -110,14 +134,14 @@ export default function Progressives() {
       <div className="page-head" style={{ marginBottom: 6 }}>
         <div className="h1" style={{ fontSize: 16 }}>TV display looks</div>
         <div className="grow" />
-        <label className="dim" style={{ fontSize: 13 }}>Each jackpot on screen for&nbsp;
+        <label className="dim" style={{ fontSize: 13 }}>Each progressive on screen for&nbsp;
           <select value={disp.seconds} disabled={!mayEdit} onChange={(e) => saveDisp({ seconds: Number(e.target.value) })}>
             {[5, 8, 10, 15, 20, 30].map((s) => <option key={s} value={s}>{s} seconds</option>)}
           </select>
         </label>
       </div>
       <p className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
-        Live previews with your real jackpots. Pick one and press Show to fill the screen — put this page on the hall TV.
+        Live previews with your real progressives. Pick one and press Show to fill the screen — put this page on the hall TV.
         On the TV: Esc or double-click to leave, arrow keys to step through.
       </p>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 16 }}>
@@ -148,75 +172,116 @@ export default function Progressives() {
           }}
           onDelete={async (p) => { await saveList(list.filter((x) => x.id !== p.id), `${p.name} removed`); setEditing(null); }} />
       )}
-      {hitting && (
-        <div className="modal-bg" onClick={() => setHitting(null)}>
-          <div className="modal" style={{ width: 420 }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{hitting.name} — jackpot hit?</div>
+      {hitting && <HitModal prog={hitting} boxes={boxes} products={products} onHit={recordHit} onClose={() => setHitting(null)} />}
+    </div>
+  );
+}
+
+function HitModal({ prog, boxes, products, onHit, onClose }) {
+  const multi = prog.parts.length > 1;
+  const [pick, setPick] = useState(multi ? [] : [prog.parts[0].id]);
+  const [busy, setBusy] = useState(false);
+  const amt = (pt) => partAmount(prog, pt, boxes, products);
+  const go = async (ids) => { if (busy || !ids.length) return; setBusy(true); try { await onHit(prog, ids); } finally { setBusy(false); } };
+  const sum = prog.parts.filter((pt) => pick.includes(pt.id)).reduce((s, pt) => s + amt(pt), 0);
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" style={{ width: 460 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{prog.name} — jackpot hit</div>
+        {multi ? (
+          <>
+            <p className="dim" style={{ fontSize: 13, marginBottom: 10 }}>Which bonus hit? Each one you pick is paid and starts over.</p>
+            {prog.parts.map((pt, i) => (
+              <label key={pt.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, marginBottom: 6, cursor: 'pointer' }}>
+                <input type="checkbox" checked={pick.includes(pt.id)}
+                  onChange={() => setPick((x) => (x.includes(pt.id) ? x.filter((y) => y !== pt.id) : [...x, pt.id]))} />
+                <span style={{ width: 12, height: 12, borderRadius: '50%', background: pt.color || colorFor(pt.label, i), border: '1px solid rgba(0,0,0,.25)' }} />
+                <b style={{ flex: 1 }}>{pt.label}</b>
+                <span className="mono">{fmtJackpot(amt(pt))}</span>
+              </label>
+            ))}
+            <button className="btn ghost" disabled={busy} style={{ width: '100%', marginTop: 4 }} onClick={() => go(prog.parts.map((x) => x.id))}
+              title="The ticket that pays every bonus at once">
+              All {prog.parts.length} hit at once ({prog.parts.map((x) => x.label).join('-')} ticket) · {fmtJackpot(prog.parts.reduce((s, pt) => s + amt(pt), 0))}
+            </button>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button className="btn primary" disabled={busy || !pick.length} onClick={() => go(pick)}>
+                {pick.length ? `Record ${fmtJackpot(sum)}` : 'Pick a bonus'}
+              </button>
+              <div style={{ flex: 1 }} />
+              <button className="btn ghost" onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        ) : (
+          <>
             <p className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
-              Records a payout of <b className="mono">{fmtJackpot(currentAmount(hitting, boxes))}</b> now and starts
-              the jackpot over at {fmtJackpot(hitting.seed || 0)}. Only boxes sold out after this count toward the next one.
+              Records a payout of <b className="mono">{fmtJackpot(amt(prog.parts[0]))}</b> now and starts the
+              progressive over at {fmtJackpot(prog.parts[0].seed || 0)}. Only deals sold out after this count toward the next one.
             </p>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn primary" onClick={async () => {
-                const before = list;
-                const p = hit(hitting, boxes);
-                await saveList(list.map((x) => (x.id === p.id ? p : x)), `${p.name}: ${fmtJackpot(p.hits[0].amount)} hit recorded`);
-                setHitting(null);
-                setToast(`${p.name}: hit recorded`, async () => { await store.setSetting('progressives', before); await reloadSettings(); });
-              }}>Record hit</button>
+              <button className="btn primary" disabled={busy} onClick={() => go(pick)}>Record hit</button>
               <div style={{ flex: 1 }} />
-              <button className="btn ghost" onClick={() => setHitting(null)}>Cancel</button>
+              <button className="btn ghost" onClick={onClose}>Cancel</button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
 function EditModal({ prog, list, products, onSave, onDelete, onClose }) {
   const isNew = !prog.id;
+  const now = new Date().toISOString();
   const [f, setF] = useState({
-    name: prog.name || '', color: prog.color || PALETTE[list.length % PALETTE.length],
-    seed: prog.seed ?? 0, per_box: prog.per_box ?? '', adjust: prog.adjust ?? 0, game_ids: prog.game_ids || [],
+    name: prog.name || '', color: prog.color || PALETTE[list.length % PALETTE.length], game_ids: prog.game_ids || [],
+    parts: (prog.parts || [{ id: 'main', label: '', color: null, per_box: null, seed: 0, adjust: 0, reset_at: now, hits: [] }])
+      .map((pt) => ({ ...pt, per_box: pt.per_box ?? '', seed: pt.seed ?? 0, adjust: pt.adjust ?? 0 })),
   });
   const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const setPart = (i, k, v) => setF((x) => ({ ...x, parts: x.parts.map((pt, j) => (j === i ? { ...pt, [k]: v } : pt)) }));
   const toggle = (id) => set('game_ids', f.game_ids.includes(id) ? f.game_ids.filter((x) => x !== id) : [...f.game_ids, id]);
+  const multi = f.parts.length > 1;
   const sorted = [...products].filter((p) => p.active !== false)
     .sort((a, b) => (Number(b.progressive_amount) || 0) - (Number(a.progressive_amount) || 0) || a.name.localeCompare(b.name));
+  const addPart = () => setF((x) => {
+    const parts = x.parts.length === 1 && !x.parts[0].label ? [{ ...x.parts[0], label: 'Red', color: '#ff2a2a' }] : x.parts;
+    const k = parts.length;
+    return { ...x, parts: [...parts, { id: 'p' + Date.now().toString(36) + k, label: '', color: PALETTE[k % PALETTE.length], per_box: '', seed: 0, adjust: 0, reset_at: now, hits: [] }] };
+  });
   const save = (e) => {
     e.preventDefault();
     if (!f.name.trim()) return;
     onSave({
-      hits: [], reset_at: isNew ? new Date().toISOString() : null, ...prog,
+      ...prog,
       id: prog.id || 'p' + Date.now().toString(36),
-      name: f.name.trim(), color: f.color, seed: Number(f.seed) || 0, per_box: Number(f.per_box) || 0,
-      adjust: Number(f.adjust) || 0, game_ids: f.game_ids,
+      name: f.name.trim(), color: f.color, game_ids: f.game_ids,
+      parts: f.parts.map((pt) => ({
+        ...pt, label: (pt.label || '').trim(), per_box: pt.per_box === '' ? null : Number(pt.per_box),
+        seed: Number(pt.seed) || 0, adjust: Number(pt.adjust) || 0,
+      })),
     });
   };
+  const num = { textAlign: 'right', width: '100%' };
   return (
     <div className="modal-bg" onClick={onClose}>
-      <form className="modal" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={save}>
+      <form className="modal" style={{ width: 640 }} onClick={(e) => e.stopPropagation()} onSubmit={save}>
         <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 12 }}>{isNew ? 'Add a progressive' : `Edit ${prog.name}`}</div>
-        <div className="field"><label>Name (shown on the TV)</label>
-          <input type="text" autoFocus value={f.name} onChange={(e) => set('name', e.target.value)} style={{ width: '100%' }} /></div>
-        <div className="field"><label>Colour</label>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            {PALETTE.map((c) => (
-              <button type="button" key={c} onClick={() => set('color', c)} title={c}
-                style={{ width: 26, height: 26, borderRadius: '50%', background: c, cursor: 'pointer',
-                  border: f.color === c ? '3px solid var(--ink)' : '1px solid rgba(0,0,0,.25)' }} />
-            ))}
-            <input type="color" value={f.color} onChange={(e) => set('color', e.target.value)} style={{ width: 34, height: 28, border: 'none', background: 'none' }} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12 }}>
+          <div className="field"><label>Name (the headline on the TV)</label>
+            <input type="text" autoFocus value={f.name} onChange={(e) => set('name', e.target.value)} style={{ width: '100%' }} /></div>
+          <div className="field"><label>Colour</label>
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+              {PALETTE.map((c) => (
+                <button type="button" key={c} onClick={() => set('color', c)} title={c}
+                  style={{ width: 22, height: 22, borderRadius: '50%', background: c, cursor: 'pointer', border: f.color === c ? '3px solid var(--ink)' : '1px solid rgba(0,0,0,.25)' }} />
+              ))}
+            </div>
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-          <div className="field"><label>Starts at $</label><input type="number" step="0.01" value={f.seed} onChange={(e) => set('seed', e.target.value)} /></div>
-          <div className="field"><label>$ added per box sold out</label><input type="number" step="0.01" value={f.per_box} onChange={(e) => set('per_box', e.target.value)} /></div>
-          <div className="field"><label>Manual adjustment $</label><input type="number" step="0.01" value={f.adjust} onChange={(e) => set('adjust', e.target.value)} /></div>
-        </div>
-        <div className="field"><label>Games that feed it</label>
-          <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 5, padding: '4px 8px' }}>
+
+        <div className="field"><label>Games that pay into it</label>
+          <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 5, padding: '4px 8px' }}>
             {sorted.map((g) => (
               <label key={g.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '3px 0', fontSize: 13, textTransform: 'none', letterSpacing: 0, color: 'var(--ink)' }}>
                 <input type="checkbox" checked={f.game_ids.includes(g.id)} onChange={() => toggle(g.id)} />
@@ -225,7 +290,31 @@ function EditModal({ prog, list, products, onSave, onDelete, onClose }) {
             ))}
           </div>
         </div>
-        <p className="dimmer" style={{ fontSize: 11.5 }}>Use the manual adjustment to match the jackpot board on day one, or to correct it later.</p>
+
+        <div className="field" style={{ marginBottom: 4 }}><label>{multi ? 'Bonuses — each grows and pays on its own' : 'Amounts'}</label></div>
+        <table className="tbl" style={{ marginBottom: 6 }}>
+          <thead><tr>
+            {multi && <th>Bonus</th>}{multi && <th />}
+            <th className="r">$ per deal sold out</th><th className="r">Starts at $</th><th className="r">Adjustment $</th>{multi && <th />}
+          </tr></thead>
+          <tbody>
+            {f.parts.map((pt, i) => (
+              <tr key={pt.id}>
+                {multi && <td><input type="text" value={pt.label} placeholder="e.g. Red" onChange={(e) => setPart(i, 'label', e.target.value)} style={{ width: 90 }} /></td>}
+                {multi && <td><input type="color" value={pt.color || colorFor(pt.label, i)} onChange={(e) => setPart(i, 'color', e.target.value)} style={{ width: 30, height: 24, border: 'none', background: 'none' }} /></td>}
+                <td><input type="number" step="0.01" style={num} value={pt.per_box} placeholder="each game's own" onChange={(e) => setPart(i, 'per_box', e.target.value)} /></td>
+                <td><input type="number" step="0.01" style={num} value={pt.seed} onChange={(e) => setPart(i, 'seed', e.target.value)} /></td>
+                <td><input type="number" step="0.01" style={num} value={pt.adjust} onChange={(e) => setPart(i, 'adjust', e.target.value)} /></td>
+                {multi && <td><button type="button" className="btn ghost sm" onClick={() => set('parts', f.parts.filter((_, j) => j !== i))}>×</button></td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <button type="button" className="btn ghost sm" onClick={addPart}>+ Add a bonus{multi ? '' : ' (split into red / white / blue style parts)'}</button>
+        <p className="dimmer" style={{ fontSize: 11.5, marginTop: 8 }}>
+          Leave "$ per deal" blank to use each game's own "Amount to progressive" from the catalog.
+          Use the adjustment to match the board on day one, or to correct it later.
+        </p>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn primary" type="submit">Save</button>
           {!isNew && <button className="btn ghost" type="button" style={{ color: '#a33' }} onClick={() => onDelete(prog)}>Remove</button>}

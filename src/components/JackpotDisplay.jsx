@@ -39,7 +39,7 @@ export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, 
   const item = items[i] || { id: 'none', name: 'No progressives yet', color: '#ffc21a', amount: 0 };
   const props = { item, items, index: i, preview };
   return (
-    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
+    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}${/progressive/i.test(item.name) ? ' jp-named' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
       onDoubleClick={!preview ? onExit : undefined}>
       {look === 'inferno' && <Inferno {...props} />}
       {look === 'marquee' && <Marquee {...props} />}
@@ -76,6 +76,22 @@ const Amount = ({ item, className }) => {
   const v = useRollUp(item.amount, item.id);
   const shown = fmtJackpot(Math.round(v * 100) / 100 === item.amount ? item.amount : Math.floor(v));
   return <div key={item.id} className={'jp-amt ' + (className || '')} data-text={shown}>{shown}</div>;
+};
+
+/** One pot: one huge number. Several parts (red / white / blue): side by side, each in its colour. */
+const Amounts = ({ item }) => {
+  const parts = item.parts || [];
+  if (parts.length < 2) return <Amount item={item} />;
+  return (
+    <div className="jp-parts">
+      {parts.map((p) => (
+        <div key={p.id} className="jp-part" style={{ '--pc': p.color }}>
+          <div className="jp-plabel">{p.label}</div>
+          <Amount item={{ id: item.id + ':' + p.id, amount: p.amount }} />
+        </div>
+      ))}
+    </div>
+  );
 };
 
 // ---------- particles ----------
@@ -185,7 +201,7 @@ function Inferno({ item }) {
           {'PROGRESSIVE JACKPOT'.split('').map((ch, k) => <span key={k} style={{ animationDelay: `${k * 0.06}s` }}>{ch === ' ' ? ' ' : ch}</span>)}
         </div>
         <div className="jp-name">{item.name}</div>
-        <Amount item={item} />
+        <Amounts item={item} />
         <div className="jp-sub">🔥 GROWING EVERY BOX 🔥</div>
       </div>
       <div className="jp-flash" key={'f' + item.id} />
@@ -209,7 +225,7 @@ function Marquee({ item }) {
       <div className="jp-stage" key={item.id}>
         <div className="jp-title">★ PROGRESSIVE JACKPOT ★</div>
         <div className="jp-name">{item.name}</div>
-        <Amount item={item} />
+        <Amounts item={item} />
         <div className="jp-sub">PROGRESSIVE · PLAY NOW</div>
       </div>
       <div className="jp-flash" key={'f' + item.id} />
@@ -226,7 +242,7 @@ function Gold({ item }) {
       <div className="jp-stage" key={item.id}>
         <div className="jp-title">PROGRESSIVE JACKPOT</div>
         <div className="jp-name">{item.name}</div>
-        <Amount item={item} />
+        <Amounts item={item} />
         <div className="jp-sub">◆ IT COULD BE YOU ◆</div>
       </div>
       <div className="jp-flash" key={'f' + item.id} />
@@ -235,13 +251,15 @@ function Gold({ item }) {
 }
 
 function Led({ item, items }) {
-  const ticker = items.map((x) => `${x.name.toUpperCase()} ${fmtJackpot(x.amount)}`).join('   ◆   ');
+  const ticker = items.map((x) => ((x.parts || []).length > 1
+    ? `${x.name.toUpperCase()}  ` + x.parts.map((p) => `${p.label.toUpperCase()} ${fmtJackpot(p.amount)}`).join('  ')
+    : `${x.name.toUpperCase()} ${fmtJackpot(x.amount)}`)).join('   ◆   ');
   return (
     <>
       <div className="jp-stage" key={item.id}>
         <div className="jp-title"><span className="blink">●</span> PROGRESSIVE <span className="blink">●</span></div>
         <div className="jp-name">{item.name}</div>
-        <Amount item={item} />
+        <Amounts item={item} />
       </div>
       <div className="jp-ticker"><div><span>{ticker}</span><span>{ticker}</span></div></div>
       <div className="jp-dotmask" />

@@ -90,3 +90,19 @@
 @media (prefers-reduced-motion: reduce) {
   .jp-preview * { animation-duration: 0s !important; animation-iteration-count: 1 !important; }
 }
+
+/* ---------------- several parts on one progressive (Freedom Flash: red / white / blue) ---------------- */
+.jp-parts { display: flex; gap: 4cqw; align-items: flex-end; justify-content: center; margin-top: 1cqh; }
+.jp-part { display: flex; flex-direction: column; align-items: center; }
+.jp-plabel { font-size: 5.5cqmin; text-transform: uppercase; letter-spacing: .6cqmin; color: var(--pc);
+  text-shadow: 0 0 1cqmin #000, 0 0 3cqmin var(--pc); margin-bottom: .5cqh; }
+.jp .jp-parts .jp-amt { font-size: min(15cqmin, 9.5cqw) !important; background: none !important;
+  color: var(--pc) !important; -webkit-text-fill-color: var(--pc);
+  text-shadow: 0 0 .5cqmin #000, 0 0 2.5cqmin var(--pc), 0 0 6cqmin var(--pc) !important; filter: none !important; }
+.jp-gold .jp-parts .jp-amt::after { display: none; }
+.jp-part:nth-child(2) .jp-amt { animation-delay: .3s !important; }
+.jp-part:nth-child(3) .jp-amt { animation-delay: .6s !important; }
+
+/* the name already says "Progressive" — drop the caption that repeats it */
+.jp-named .jp-title { display: none; }
+.jp-led .jp-parts .jp-amt { font-size: min(11cqmin, 7cqw) !important; }

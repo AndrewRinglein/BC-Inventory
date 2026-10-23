@@ -523,24 +523,34 @@ test('one trigger pull with a space still works when a game is waiting', () => {
 });
 
 // ---- progressive jackpots ----
-import { parseSplit, defaultProgressives, currentAmount, hit as hitProg } from '../src/lib/logic/progressive.js';
-test('progressive: colour split becomes one jackpot per colour', () => {
-  assert.deepEqual(parseSplit('Red: 200, White: 100, Blue: 50').map((x) => x.amount), [200, 100, 50]);
-  const ps = defaultProgressives([{ id: 'G033', name: 'Freedom', progressive_amount: 350, progressive_note: 'Red: 200, White: 100, Blue: 50' },
-    { id: 'G1', name: 'Plain', progressive_amount: 25 }, { id: 'G2', name: 'None', progressive_amount: 0 }]);
-  assert.deepEqual(ps.map((p) => [p.name, p.per_box]), [['Freedom Red', 200], ['Freedom White', 100], ['Freedom Blue', 50], ['Plain', 25]]);
+import { defaultProgressives, normalize, partAmount, progAmount, hit as hitProg, BC_PROGRESSIVES } from '../src/lib/logic/progressive.js';
+const PG = [{ id: 'G032', progressive_amount: 300 }, { id: 'G034', progressive_amount: 250 }, { id: 'G035', progressive_amount: 250 },
+  { id: 'G012', progressive_amount: 300 }, { id: 'G033', progressive_amount: 350 }];
+const sold = (pid, at) => ({ product_id: pid, state: 'sold_out', sold_out_at: at });
+test('progressive: BC has three — Flashboard (3 games), Jackpot Derby, Freedom Flash red/white/blue', () => {
+  const ps = defaultProgressives(PG);
+  assert.deepEqual(ps.map((p) => p.name), BC_PROGRESSIVES.map((p) => p.name));
+  assert.deepEqual(ps[2].parts.map((x) => [x.label, x.per_box]), [['Red', 200], ['White', 100], ['Blue', 50]]);
 });
-test('progressive: grows per sold-out box, resets on a hit', () => {
-  const p = { id: 'x', seed: 100, per_box: 50, adjust: 5, game_ids: ['G1'], reset_at: null };
-  const bx = [
-    { product_id: 'G1', state: 'sold_out', sold_out_at: '2026-10-01T10:00:00Z' },
-    { product_id: 'G1', state: 'opened' },
-    { product_id: 'G2', state: 'sold_out', sold_out_at: '2026-10-01T10:00:00Z' },
-  ];
-  assert.equal(currentAmount(p, bx), 155);
-  const after = hitProg(p, bx, '2026-10-02T00:00:00Z');
-  assert.equal(after.hits[0].amount, 155);
-  assert.equal(currentAmount(after, bx), 100);
-  bx.push({ product_id: 'G1', state: 'sold_out', sold_out_at: '2026-10-03T00:00:00Z' });
-  assert.equal(currentAmount(after, bx), 150);
+test('progressive: a shared pot adds each game\'s own amount', () => {
+  const fb = defaultProgressives(PG)[0];
+  const bx = [sold('G032', '2026-10-01T01:00:00Z'), sold('G034', '2026-10-01T02:00:00Z'), { product_id: 'G032', state: 'opened' }, sold('G012', '2026-10-01T03:00:00Z')];
+  assert.equal(progAmount(fb, bx, PG), 550);
+});
+test('progressive: Freedom parts grow per deal and pay separately or all at once', () => {
+  const fr = defaultProgressives(PG)[2];
+  const bx = [sold('G033', '2026-10-01T01:00:00Z'), sold('G033', '2026-10-02T01:00:00Z')];
+  assert.deepEqual(fr.parts.map((pt) => partAmount(fr, pt, bx, PG)), [400, 200, 100]);
+  const afterWhite = hitProg(fr, ['white'], bx, PG, '2026-10-03T00:00:00Z');
+  assert.deepEqual(afterWhite.parts.map((pt) => partAmount(afterWhite, pt, bx, PG)), [400, 0, 100]);
+  assert.equal(afterWhite.parts[1].hits[0].amount, 200);
+  bx.push(sold('G033', '2026-10-04T01:00:00Z'));
+  const all = hitProg(afterWhite, ['red', 'white', 'blue'], bx, PG, '2026-10-05T00:00:00Z');
+  assert.deepEqual(all.parts.map((pt) => pt.hits[0].amount), [600, 100, 150]);
+  assert.ok(all.parts.every((pt) => pt.hits[0].together));
+  assert.equal(progAmount(all, bx, PG), 0);
+});
+test('progressive: old one-pot shape still reads', () => {
+  const p = normalize({ id: 'x', name: 'X', game_ids: ['G012'], per_box: 50, seed: 100, adjust: 5, reset_at: null });
+  assert.equal(progAmount(p, [sold('G012', '2026-10-01T00:00:00Z')], PG), 155);
 });

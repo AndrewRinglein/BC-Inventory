@@ -1,0 +1,84 @@
+// Edge function: send-email
+// Sends the app's emails via Resend and logs every attempt to the emails table.
+// Secrets needed (supabase secrets set):  RESEND_API_KEY
+// Deploy:  supabase functions deploy send-email
+
+import { createClient } from 'npm:@supabase/supabase-js@2';
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
+  try {
+    const { emails, hall_id, settings, sender } = await req.json();
+    const sb = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    );
+    const resendKey = Deno.env.get('RESEND_API_KEY');
+    const testMode = settings?.testMode !== false;
+    const testAddr = settings?.testAddress || '';
+    const fromAddr = settings?.fromAddress || 'onboarding@resend.dev';
+    // Emails come from a named person, not "the system" — vendors reply to a human.
+    const senderName = [sender?.name, sender?.org].filter(Boolean).join(' — ').trim();
+    const from = senderName ? `${senderName} <${fromAddr}>` : fromAddr;
+    const replyTo = (sender?.replyTo || '').trim();
+    // ccAddress may list several addresses, comma- or semicolon-separated
+    const ccList: string[] = String(settings?.ccAddress || '')
+      .split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+
+    const logs = [];
+    for (const e of emails) {
+      const to = testMode ? testAddr : e.to;
+      let status = 'failed';
+      let providerId: string | null = null;
+      let errNote = '';
+
+      if (!to || to.startsWith('(')) {
+        errNote = 'no recipient address configured';
+      } else if (!resendKey) {
+        errNote = 'RESEND_API_KEY not set';
+      } else {
+        const payload: Record<string, unknown> = {
+          from,
+          to: [to],
+          subject: (testMode ? '[TEST] ' : '') + e.subject,
+          text: e.body + (testMode ? `\n\n--- TEST MODE: would have gone to ${e.to} ---` : ''),
+        };
+        // Send both parts when we have them. The mail client picks: a phone shows the
+        // HTML (which reflows), anything plain-text-only falls back to the same content
+        // as a fixed-width table. Never HTML-only — some vendors read mail in clients
+        // that would show them nothing.
+        if (e.html) {
+          payload.html = testMode
+            ? e.html.replace('</body>', `<p style="font:13px sans-serif;color:#9a6b00">--- TEST MODE: would have gone to ${e.to} ---</p></body>`)
+            : e.html;
+        }
+        // don't CC in test mode (everything already goes to one inbox), and never CC the recipient
+        const cc = testMode ? [] : ccList.filter((a) => a.toLowerCase() !== to.toLowerCase());
+        if (cc.length) payload.cc = cc;
+        if (replyTo) payload.reply_to = [replyTo];
+        const r = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (r.ok) { const d = await r.json(); providerId = d.id; status = 'sent'; }
+        else errNote = `resend ${r.status}: ${await r.text()}`;
+      }
+
+      const { data } = await sb.from('emails').insert({
+        hall_id, po_num: e.po_num || null, kind: e.kind || 'other',
+        to_addr: to || e.to, subject: e.subject, body: e.body,
+        test_mode: testMode, provider_id: providerId, status,
+      }).select().single();
+      logs.push({ ...data, error: errNote || undefined });
+    }
+    return Response.json({ logs }, { headers: CORS });
+  } catch (err) {
+    return Response.json({ error: String(err) }, { status: 500, headers: CORS });
+  }
+});

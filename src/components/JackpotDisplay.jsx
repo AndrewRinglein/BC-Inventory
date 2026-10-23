@@ -15,7 +15,7 @@ export const LOOKS = [
   { id: 'led', name: 'LED Board', blurb: 'Amber dot-matrix sign with a scrolling ticker.' },
 ];
 
-export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, preview = false, startAt = 0, onExit }) {
+export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, preview = false, startAt = 0, onExit, tv = false }) {
   const [i, setI] = useState(startAt % Math.max(items.length, 1));
   const n = items.length;
   useEffect(() => {
@@ -39,7 +39,7 @@ export default function JackpotDisplay({ items, look = 'inferno', seconds = 10, 
   const item = items[i] || { id: 'none', name: 'No progressives yet', color: '#ffc21a', amount: 0 };
   const props = { item, items, index: i, preview };
   return (
-    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}${/progressive/i.test(item.name) ? ' jp-named' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
+    <div className={`jp jp-${look}${preview ? ' jp-preview' : ''}${/progressive/i.test(item.name) ? ' jp-named' : ''}${tv ? ' jp-tv' : ''}`} style={{ '--c': item.color, '--len': Math.max(item.name.length, 6) }}
       onDoubleClick={!preview ? onExit : undefined}>
       {look === 'inferno' && <Inferno {...props} />}
       {look === 'marquee' && <Marquee {...props} />}

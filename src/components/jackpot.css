@@ -106,3 +106,4 @@
 /* the name already says "Progressive" — drop the caption that repeats it */
 .jp-named .jp-title { display: none; }
 .jp-led .jp-parts .jp-amt { font-size: min(11cqmin, 7cqw) !important; }
+.jp.jp-tv, .jp.jp-tv:hover, .jp.jp-tv * { cursor: none !important; }

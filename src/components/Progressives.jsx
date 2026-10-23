@@ -162,6 +162,8 @@ export default function Progressives() {
         ))}
       </div>
 
+      <TvSetup look={LOOKS.find((l) => l.id === disp.look)?.name} setToast={setToast} />
+
       {editing && (
         <EditModal prog={editing} list={list} products={products}
           onClose={() => setEditing(null)}
@@ -322,6 +324,62 @@ function EditModal({ prog, list, products, onSave, onDelete, onClose }) {
           <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/** The TV link and a one-click launcher for the computer plugged into the TV. */
+function TvSetup({ look, setToast }) {
+  const u = new URL(window.location.href);
+  const keep = u.searchParams.has('demo') ? '&demo' : '';
+  const link = `${u.origin}${u.pathname}?tv${keep}`;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(link); setToast('TV link copied'); } catch { setToast('Copy failed — select the link and copy it'); }
+  };
+  const launcher = () => {
+    const chrome = '%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe';
+    const bat = [
+      '@echo off',
+      'REM BC Inventory - progressive jackpot TV. Opens the TV display full screen on the screen it starts on.',
+      'REM To leave it: press Alt+F4.  To start it with the computer: put this file (or a shortcut) in',
+      'REM   Win+R  ->  shell:startup',
+      `set "URL=${link}"`,
+      `if not exist "${chrome}" set "CHROME=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"`,
+      `if exist "${chrome}" set "CHROME=${chrome}"`,
+      'if defined CHROME if exist "%CHROME%" (',
+      `  start "" "%CHROME%" --kiosk --no-first-run --disable-session-crashed-bubble --disable-features=Translate "%URL%"`,
+      ') else (',
+      '  start "" msedge --start-fullscreen --no-first-run --app="%URL%"',
+      ')',
+      '',
+    ].join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bat], { type: 'application/octet-stream' }));
+    a.download = 'BC Jackpot TV.bat';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+  return (
+    <div className="card pad" style={{ marginTop: 18 }}>
+      <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Hall TV (HDMI)</div>
+      <p className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
+        The TV shows the <b>TV default</b> look ({look}), full screen, with nothing else on it. Change the default above and the
+        TV switches within 30 seconds; amounts update as boxes sell out.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+        <input type="text" readOnly value={link} className="mono" style={{ flex: 1, minWidth: 260 }} onFocus={(e) => e.target.select()} />
+        <button className="btn ghost sm" onClick={copy}>Copy link</button>
+        <a className="btn ghost sm" href={link} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>Open TV view</a>
+        <button className="btn primary sm" onClick={launcher}>Download TV launcher (Windows)</button>
+      </div>
+      <ol className="dim" style={{ fontSize: 12.5, lineHeight: 1.7, paddingLeft: 18 }}>
+        <li>Plug the computer into the TV with HDMI. In Windows display settings (Win+P), choose <b>Second screen only</b> — or
+          <b> Duplicate</b> if you want the same picture on both.</li>
+        <li>On that computer, open the TV link once and sign in. It stays signed in after that.</li>
+        <li>Run <b>BC Jackpot TV.bat</b>: the display opens full screen with no browser bars or cursor. Alt+F4 closes it.</li>
+        <li>To start it automatically when the computer turns on, press Win+R, type <span className="mono">shell:startup</span>, and put the .bat file in that folder.
+          Also set Windows Power &amp; sleep to <b>Never</b> so the screen stays on.</li>
+      </ol>
     </div>
   );
 }
